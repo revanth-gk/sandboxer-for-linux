@@ -140,8 +140,8 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
     // Connect to child-exited to close window when process exits
     g_signal_connect(terminal, "child-exited", G_CALLBACK(gtk_widget_destroy), window);
 
-    // Store the name in the window's user data for later use
-    g_object_set_data(G_OBJECT(window), "sandbox_name", g_strdup(name));
+    // Store the name in the window's user data for later use with proper memory management
+    g_object_set_data_full(G_OBJECT(window), "sandbox_name", g_strdup(name), g_free);
 
     // Connect to the map signal to spawn the terminal after the widget is mapped
     g_signal_connect(terminal, "map", G_CALLBACK(on_terminal_realized), window);
@@ -164,8 +164,7 @@ void on_terminal_realized(GtkWidget *terminal, gpointer user_data) {
         gtk_widget_destroy(window);
     }
 
-    // Free the stored name
-    g_free(name);
+    // Clear the stored name without freeing it (g_object_set_data_full will handle freeing)
     g_object_set_data(G_OBJECT(window), "sandbox_name", NULL);
 }
 
