@@ -123,49 +123,30 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
     GtkWidget *label = gtk_bin_get_child(GTK_BIN(row));
     const char *text = gtk_label_get_text(GTK_LABEL(label));
     char name[256];
-    sscanf(text, "Name: %[^,]", name);
-
-    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(window), "Sandbox Terminal");
-    gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
-    g_signal_connect(window, "destroy", G_CALLBACK(gtk_widget_destroy), NULL);
-
-    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_container_add(GTK_CONTAINER(window), box);
-
-    // Create terminal and pack it before interacting with it
-    GtkWidget *terminal = vte_terminal_new();
-    gtk_box_pack_start(GTK_BOX(box), terminal, TRUE, TRUE, 0);
-
-    // Connect to child-exited to close window when process exits
-    g_signal_connect(terminal, "child-exited", G_CALLBACK(gtk_widget_destroy), window);
-
-    // Store the name in the window's user data for later use with proper memory management
-    g_object_set_data_full(G_OBJECT(window), "sandbox_name", g_strdup(name), g_free);
-
-    // Connect to the map signal to spawn the terminal after the widget is mapped
-    g_signal_connect(terminal, "map", G_CALLBACK(on_terminal_realized), window);
-
-    // Show all widgets after packing everything
-    gtk_widget_show_all(window);
-}
-
-void on_terminal_realized(GtkWidget *terminal, gpointer user_data) {
-    GtkWidget *window = GTK_WIDGET(user_data);
-    char *name = g_object_get_data(G_OBJECT(window), "sandbox_name");
-
-    // Spawn the sandbox
-    char *argv[] = {"./bin/sandbox", "-e", "-s", name, NULL};
-    GError *error = NULL;
-    vte_terminal_spawn_async(VTE_TERMINAL(terminal), VTE_PTY_DEFAULT, NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, -1, NULL, NULL, &error);
-    if (error) {
-        fprintf(stderr, "Failed to spawn: %s\n", error->message);
-        g_error_free(error);
-        gtk_widget_destroy(window);
+    if (sscanf(text, "Name: %[^,]", name) != 1) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to parse sandbox name");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
     }
 
-    // Clear the stored name without freeing it (g_object_set_data_full will handle freeing)
-    g_object_set_data(G_OBJECT(window), "sandbox_name", NULL);
+    // Instead of embedding a terminal, launch a new terminal window
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "xterm -e \"sudo ./bin/sandbox -e -s %s\" &", name);
+    
+    int result = system(cmd);
+    if (result != 0) {
+        // Fallback to gnome-terminal if xterm is not available
+        snprintf(cmd, sizeof(cmd), "gnome-terminal -- ./bin/sandbox -e -s %s &", name);
+        result = system(cmd);
+        if (result != 0) {
+            GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, 
+                                                    "Failed to launch terminal. Please run manually:\n"
+                                                    "sudo ./bin/sandbox -e -s %s", name);
+            gtk_dialog_run(GTK_DIALOG(dialog));
+            gtk_widget_destroy(dialog);
+        }
+    }
 }
 
 void on_clear_clicked(GtkButton *button, gpointer user_data) {
