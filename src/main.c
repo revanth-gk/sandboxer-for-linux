@@ -37,7 +37,7 @@ void log_action(const char *action) {
 
 int setup_sandbox(void *arg) {
     struct SandboxConfig *config = (struct SandboxConfig *)arg;
-    int run_shell = config ? config->memory : 0; // hack, use memory as flag
+    int should_run_shell = config ? 1 : 0; // Always run shell when config is provided
     log_action("Setting up sandbox");
 
     // Chroot
@@ -73,14 +73,20 @@ int setup_sandbox(void *arg) {
     // Set resource limits
     if (config) {
         struct rlimit rl;
-        rl.rlim_cur = rl.rlim_max = config->memory * 1024 * 1024; // MB to bytes
-        setrlimit(RLIMIT_AS, &rl);
+        rl.rlim_cur = config->memory * 1024 * 1024; // MB to bytes
+        rl.rlim_max = RLIM_INFINITY; // Allow increasing soft limit
+        if (setrlimit(RLIMIT_AS, &rl) == -1) {
+            perror("setrlimit RLIMIT_AS");
+        }
 
-        rl.rlim_cur = rl.rlim_max = config->cpu; // seconds
-        setrlimit(RLIMIT_CPU, &rl);
+        rl.rlim_cur = config->cpu; // seconds
+        rl.rlim_max = RLIM_INFINITY; // Allow increasing soft limit
+        if (setrlimit(RLIMIT_CPU, &rl) == -1) {
+            perror("setrlimit RLIMIT_CPU");
+        }
     }
 
-    if (run_shell) {
+    if (should_run_shell) {
         // Run shell
         execl("/bin/busybox", "busybox", "sh", NULL);
         execl("/bin/sh", "sh", NULL);
@@ -215,17 +221,19 @@ int main(int argc, char *argv[]) {
     int memory = 100; // MB
     int cpu = 10; // sec
     int network = 0; // 0 disable, 1 enable
+    int create = 0, enter = 0, delete = 0;
     char *name = NULL;
+    
     while ((opt = getopt(argc, argv, "cedm:t:ns:")) != -1) {
         switch (opt) {
             case 'c':
-                create_sandbox(memory, cpu, network, name);
+                create = 1;
                 break;
             case 'e':
-                enter_sandbox(name);
+                enter = 1;
                 break;
             case 'd':
-                delete_sandbox();
+                delete = 1;
                 break;
             case 'm':
                 memory = atoi(optarg);
@@ -244,5 +252,27 @@ int main(int argc, char *argv[]) {
                 return 1;
         }
     }
+    
+    // Validate mutually exclusive options
+    int action_count = create + enter + delete;
+    if (action_count == 0) {
+        fprintf(stderr, "Error: Must specify one of -c, -e, or -d\n");
+        fprintf(stderr, "Usage: %s -c (create) -e (enter) -d (delete) [-m memory(MB)] [-t cpu(sec)] [-n (enable network)] [-s name]\n", argv[0]);
+        return 1;
+    }
+    
+    if (action_count > 1) {
+        fprintf(stderr, "Error: Cannot specify more than one of -c, -e, or -d\n");
+        return 1;
+    }
+    
+    if (create) {
+        create_sandbox(memory, cpu, network, name);
+    } else if (enter) {
+        enter_sandbox(name);
+    } else if (delete) {
+        delete_sandbox();
+    }
+    
     return 0;
 }
