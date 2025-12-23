@@ -18,8 +18,8 @@ typedef struct {
 } Sandbox;
 
 GtkWidget *entry_name;
-GtkWidget *entry_memory;
-GtkWidget *entry_cpu;
+GtkWidget *scale_memory;
+GtkWidget *scale_cpu;
 GtkWidget *check_network;
 GtkWidget *listbox;
 GList *sandboxes = NULL;
@@ -29,6 +29,8 @@ typedef struct {
     char *sandbox_name;
 } TerminalContext;
 
+static gboolean refresh_usage_cb(gpointer user_data);
+static gboolean get_usage_for(const char *name, double *cpu, double *mem);
 static void on_terminal_mapped(GtkWidget *terminal, gpointer user_data);
 static void on_spawn_ready(VteTerminal *terminal, GPid pid, GError *error, gpointer user_data);
 static void show_error_dialog(GtkWindow *parent, const char *msg, GError *err);
@@ -109,9 +111,10 @@ void update_list() {
         strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&s->date));
         GtkWidget *label = gtk_label_new(NULL);
         char text[1024];
-        sprintf(text, "Name: %s, Memory: %d MB, CPU: %d s, Network: %s, Date: %s",
+        sprintf(text, "Name: %s, Memory: %d MB, CPU: %d s, Network: %s, Date: %s, Usage: N/A",
                 s->name, s->memory, s->cpu, s->network ? "Yes" : "No", buf);
         gtk_label_set_text(GTK_LABEL(label), text);
+        g_object_set_data(G_OBJECT(label), "sandbox_ptr", s);
         gtk_list_box_insert(GTK_LIST_BOX(listbox), label, -1);
     }
     gtk_widget_show_all(listbox);
@@ -190,27 +193,34 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
     const char *name = gtk_entry_get_text(GTK_ENTRY(entry_name));
-    const char *mem_str = gtk_entry_get_text(GTK_ENTRY(entry_memory));
-    const char *cpu_str = gtk_entry_get_text(GTK_ENTRY(entry_cpu));
+    int memory = (int)gtk_range_get_value(GTK_RANGE(scale_memory));
+    int cpu = (int)gtk_range_get_value(GTK_RANGE(scale_cpu));
     int network = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(check_network));
 
-    if (!name || !*name || !mem_str || !*mem_str || !cpu_str || !*cpu_str) {
+    if (!name || !*name) {
         GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Please fill all fields");
         gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
         return;
     }
 
-    int memory = atoi(mem_str);
-    int cpu = atoi(cpu_str);
-    if (memory <= 0 || cpu <= 0) {
-        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Invalid numeric values");
+    if (memory < 0 || memory > 1024 || cpu < 1 || cpu > 100) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Invalid slider values");
         gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
         return;
     }
 
-    if (!ensure_root(NULL)) return;
+    // Prevent duplicate names
+    for (GList *l = sandboxes; l; l = l->next) {
+        Sandbox *s = l->data;
+        if (strcmp(s->name, name) == 0) {
+            GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "A sandbox with this name already exists");
+            gtk_dialog_run(GTK_DIALOG(dialog));
+            gtk_widget_destroy(dialog);
+            return;
+        }
+    }
 
     // Build argv dynamically to avoid empty arguments
     char *argv_cmd[10] = {0};
@@ -218,9 +228,13 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     argv_cmd[idx++] = SANDBOX_BIN;
     argv_cmd[idx++] = "-c";
     argv_cmd[idx++] = "-m";
-    argv_cmd[idx++] = (char *)mem_str;
+    char mem_buf[16];
+    snprintf(mem_buf, sizeof(mem_buf), "%d", memory);
+    argv_cmd[idx++] = mem_buf;
     argv_cmd[idx++] = "-t";
-    argv_cmd[idx++] = (char *)cpu_str;
+    char cpu_buf[16];
+    snprintf(cpu_buf, sizeof(cpu_buf), "%d", cpu);
+    argv_cmd[idx++] = cpu_buf;
     if (network) {
         argv_cmd[idx++] = "-n";
     }
@@ -297,8 +311,8 @@ void on_clear_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
     gtk_entry_set_text(GTK_ENTRY(entry_name), "");
-    gtk_entry_set_text(GTK_ENTRY(entry_memory), "100");
-    gtk_entry_set_text(GTK_ENTRY(entry_cpu), "10");
+    gtk_range_set_value(GTK_RANGE(scale_memory), 100);
+    gtk_range_set_value(GTK_RANGE(scale_cpu), 10);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(check_network), FALSE);
 }
 
@@ -345,6 +359,60 @@ void on_delete_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
+static gboolean get_usage_for(const char *name, double *cpu, double *mem) {
+    if (!name || !cpu || !mem) return FALSE;
+    FILE *fp = popen("ps -eo pid,%cpu,%mem,cmd", "r");
+    if (!fp) return FALSE;
+    char line[1024];
+    // skip header
+    if (!fgets(line, sizeof(line), fp)) {
+        pclose(fp);
+        return FALSE;
+    }
+    gboolean found = FALSE;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, name)) {
+            double c = 0.0, m = 0.0;
+            if (sscanf(line, "%*d %lf %lf", &c, &m) == 2) {
+                *cpu = c;
+                *mem = m;
+                found = TRUE;
+                break;
+            }
+        }
+    }
+    pclose(fp);
+    return found;
+}
+
+static gboolean refresh_usage_cb(gpointer user_data) {
+    (void)user_data;
+    GList *rows = gtk_container_get_children(GTK_CONTAINER(listbox));
+    for (GList *r = rows; r; r = r->next) {
+        GtkListBoxRow *row = GTK_LIST_BOX_ROW(r->data);
+        GtkWidget *label = gtk_bin_get_child(GTK_BIN(row));
+        Sandbox *s = g_object_get_data(G_OBJECT(label), "sandbox_ptr");
+        if (!s) continue;
+        double cpu = 0.0, mem = 0.0;
+        gboolean ok = get_usage_for(s->name, &cpu, &mem);
+        char buf_date[512];
+        strftime(buf_date, sizeof(buf_date), "%Y-%m-%d %H:%M:%S", localtime(&s->date));
+        char text[1024];
+        if (ok) {
+            snprintf(text, sizeof(text),
+                     "Name: %s, Memory: %d MB, CPU: %d s, Network: %s, Date: %s, Usage: CPU %.1f%%, MEM %.1f%%",
+                     s->name, s->memory, s->cpu, s->network ? "Yes" : "No", buf_date, cpu, mem);
+        } else {
+            snprintf(text, sizeof(text),
+                     "Name: %s, Memory: %d MB, CPU: %d s, Network: %s, Date: %s, Usage: N/A",
+                     s->name, s->memory, s->cpu, s->network ? "Yes" : "No", buf_date);
+        }
+        gtk_label_set_text(GTK_LABEL(label), text);
+    }
+    g_list_free(rows);
+    return TRUE;
+}
+
 int main(int argc, char *argv[]) {
     gtk_init(&argc, &argv);
 
@@ -372,18 +440,20 @@ int main(int argc, char *argv[]) {
 
     label = gtk_label_new("Memory (MB):");
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
-    entry_memory = gtk_entry_new();
-    gtk_entry_set_text(GTK_ENTRY(entry_memory), "100");
-    gtk_box_pack_start(GTK_BOX(hbox), entry_memory, TRUE, TRUE, 0);
+    scale_memory = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0, 1024, 1);
+    gtk_range_set_value(GTK_RANGE(scale_memory), 100);
+    gtk_scale_set_draw_value(GTK_SCALE(scale_memory), TRUE);
+    gtk_box_pack_start(GTK_BOX(hbox), scale_memory, TRUE, TRUE, 0);
 
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
 
     label = gtk_label_new("CPU (sec):");
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
-    entry_cpu = gtk_entry_new();
-    gtk_entry_set_text(GTK_ENTRY(entry_cpu), "10");
-    gtk_box_pack_start(GTK_BOX(hbox), entry_cpu, TRUE, TRUE, 0);
+    scale_cpu = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, 100, 1);
+    gtk_range_set_value(GTK_RANGE(scale_cpu), 10);
+    gtk_scale_set_draw_value(GTK_SCALE(scale_cpu), TRUE);
+    gtk_box_pack_start(GTK_BOX(hbox), scale_cpu, TRUE, TRUE, 0);
 
     check_network = gtk_check_button_new_with_label("Enable Network");
     gtk_box_pack_start(GTK_BOX(vbox), check_network, FALSE, FALSE, 0);
@@ -415,6 +485,7 @@ int main(int argc, char *argv[]) {
     listbox = gtk_list_box_new();
     gtk_container_add(GTK_CONTAINER(scrolled), listbox);
     update_list();
+    g_timeout_add_seconds(2, refresh_usage_cb, NULL);
 
     gtk_widget_show_all(window);
     gtk_main();
