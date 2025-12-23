@@ -141,10 +141,10 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
     g_signal_connect(terminal, "child-exited", G_CALLBACK(gtk_widget_destroy), window);
 
     // Store the name in the window's user data for later use
-    g_object_set_data(G_OBJECT(window), "sandbox_name", g_strdup(name));
+    g_object_set_data_full(G_OBJECT(window), "sandbox_name", g_strdup(name), g_free);
 
-    // Connect to the map signal to spawn the terminal after the widget is mapped
-    g_signal_connect(terminal, "map", G_CALLBACK(on_terminal_realized), window);
+    // Connect to the realize signal to spawn the terminal after the widget is realized
+    g_signal_connect(terminal, "realize", G_CALLBACK(on_terminal_realized), window);
 
     // Show all widgets after packing everything
     gtk_widget_show_all(window);
@@ -154,19 +154,30 @@ void on_terminal_realized(GtkWidget *terminal, gpointer user_data) {
     GtkWidget *window = GTK_WIDGET(user_data);
     char *name = g_object_get_data(G_OBJECT(window), "sandbox_name");
 
+    if (!name) {
+        g_warning("Sandbox name not found");
+        gtk_widget_destroy(window);
+        return;
+    }
+
     // Spawn the sandbox
     char *argv[] = {"./bin/sandbox", "-e", "-s", name, NULL};
     GError *error = NULL;
-    vte_terminal_spawn_async(VTE_TERMINAL(terminal), VTE_PTY_DEFAULT, NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, -1, NULL, NULL, &error);
+    vte_terminal_spawn_sync(VTE_TERMINAL(terminal),
+                            NULL, // working directory
+                            argv,
+                            NULL, // envv
+                            G_SPAWN_SEARCH_PATH,
+                            NULL, // child_setup
+                            NULL, // child_pid
+                            &error);
     if (error) {
         fprintf(stderr, "Failed to spawn: %s\n", error->message);
         g_error_free(error);
         gtk_widget_destroy(window);
     }
 
-    // Free the stored name
-    g_free(name);
-    g_object_set_data(G_OBJECT(window), "sandbox_name", NULL);
+
 }
 
 void on_clear_clicked(GtkButton *button, gpointer user_data) {
