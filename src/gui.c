@@ -95,7 +95,12 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     // Call CLI
     char cmd[512];
     sprintf(cmd, "./bin/sandbox -c -m %d -t %d %s -s %s", memory, cpu, network ? "-n" : "", name);
-    (void)system(cmd);
+    if (system(cmd) != 0) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to create sandbox");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
+    }
 
     // Add to list
     Sandbox *s = malloc(sizeof(Sandbox));
@@ -107,6 +112,10 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     sandboxes = g_list_append(sandboxes, s);
     save_sandboxes();
     update_list();
+}
+
+void on_child_exited(VteTerminal *terminal, int status, gpointer user_data) {
+    gtk_widget_destroy(GTK_WIDGET(user_data));
 }
 
 void on_enter_clicked(GtkButton *button, gpointer user_data) {
@@ -138,7 +147,7 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
     gtk_box_pack_start(GTK_BOX(box), terminal, TRUE, TRUE, 0);
 
     // Connect to child-exited to close window when process exits
-    g_signal_connect(terminal, "child-exited", G_CALLBACK(gtk_widget_destroy), window);
+    g_signal_connect(terminal, "child-exited", G_CALLBACK(on_child_exited), window);
 
     // Store the name in the window's user data for later use
     g_object_set_data_full(G_OBJECT(window), "sandbox_name", g_strdup(name), g_free);
@@ -163,14 +172,7 @@ void on_terminal_realized(GtkWidget *terminal, gpointer user_data) {
     // Spawn the sandbox
     char *argv[] = {"./bin/sandbox", "-e", "-s", name, NULL};
     GError *error = NULL;
-    vte_terminal_spawn_sync(VTE_TERMINAL(terminal),
-                            NULL, // working directory
-                            argv,
-                            NULL, // envv
-                            G_SPAWN_SEARCH_PATH,
-                            NULL, // child_setup
-                            NULL, // child_pid
-                            &error);
+    vte_terminal_spawn_async(VTE_TERMINAL(terminal), VTE_PTY_DEFAULT, NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, -1, NULL, NULL, &error);
     if (error) {
         fprintf(stderr, "Failed to spawn: %s\n", error->message);
         g_error_free(error);
@@ -211,7 +213,12 @@ void on_delete_clicked(GtkButton *button, gpointer user_data) {
 
     if (response == GTK_RESPONSE_YES) {
         // Call delete
-        (void)system("./bin/sandbox -d");
+        if (system("./bin/sandbox -d") != 0) {
+            GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to delete sandbox");
+            gtk_dialog_run(GTK_DIALOG(dialog));
+            gtk_widget_destroy(dialog);
+            return;
+        }
 
         // Remove from list
         for (GList *l = sandboxes; l; l = l->next) {
