@@ -4,8 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
-#define CONFIG_FILE "sandboxes.txt"
+#define CONFIG_FILE "/home/ubuntu/sandbox/sandboxes.txt"
+#define SANDBOX_BIN "/home/ubuntu/sandbox/bin/sandbox"
 
 typedef struct {
     char name[256];
@@ -22,7 +24,15 @@ GtkWidget *check_network;
 GtkWidget *listbox;
 GList *sandboxes = NULL;
 
-void on_terminal_realized(GtkWidget *terminal, gpointer user_data);
+typedef struct {
+    GtkWindow *window;
+    char *sandbox_name;
+} TerminalContext;
+
+static void on_terminal_mapped(GtkWidget *terminal, gpointer user_data);
+static void on_spawn_ready(VteTerminal *terminal, GPid pid, GError *error, gpointer user_data);
+static void show_error_dialog(GtkWindow *parent, const char *msg, GError *err);
+static void free_terminal_ctx(gpointer data);
 
 void load_sandboxes() {
     FILE *f = fopen(CONFIG_FILE, "r");
@@ -46,6 +56,45 @@ void save_sandboxes() {
     fclose(f);
 }
 
+static gboolean ensure_root(GtkWindow *parent) {
+    if (geteuid() == 0) return TRUE;
+    GtkWidget *dialog = gtk_message_dialog_new(parent,
+                                               GTK_DIALOG_MODAL,
+                                               GTK_MESSAGE_ERROR,
+                                               GTK_BUTTONS_OK,
+                                               "This action requires root privileges.\nRun with sudo or configure polkit.");
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    return FALSE;
+}
+
+static gboolean run_command(char *const argv[], GtkWindow *parent) {
+    GError *err = NULL;
+    gchar *stdout_str = NULL;
+    gchar *stderr_str = NULL;
+    gint status = 0;
+    gboolean ok = g_spawn_sync(NULL,
+                               argv,
+                               NULL,
+                               G_SPAWN_SEARCH_PATH,
+                               NULL,
+                               NULL,
+                               &stdout_str,
+                               &stderr_str,
+                               &status,
+                               &err);
+    if (!ok || status != 0) {
+        show_error_dialog(parent, err ? "Command failed to start" : "Command returned error", err);
+        if (stderr_str && *stderr_str) {
+            g_printerr("%s\n", stderr_str);
+        }
+        g_clear_error(&err);
+    }
+    g_free(stdout_str);
+    g_free(stderr_str);
+    return ok && status == 0;
+}
+
 void update_list() {
     // Clear listbox
     GList *children = gtk_container_get_children(GTK_CONTAINER(listbox));
@@ -66,6 +115,75 @@ void update_list() {
         gtk_list_box_insert(GTK_LIST_BOX(listbox), label, -1);
     }
     gtk_widget_show_all(listbox);
+}
+
+static void show_error_dialog(GtkWindow *parent, const char *msg, GError *err) {
+    g_printerr("%s: %s\n", msg, err ? err->message : "unknown error");
+    GtkWidget *dialog = gtk_message_dialog_new(parent,
+                                               GTK_DIALOG_MODAL,
+                                               GTK_MESSAGE_ERROR,
+                                               GTK_BUTTONS_OK,
+                                               "%s", msg);
+    if (err && err->message) {
+        gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog), "%s", err->message);
+    }
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+}
+
+static void on_spawn_ready(VteTerminal *terminal, GPid pid, GError *error, gpointer user_data) {
+    TerminalContext *ctx = user_data;
+    if (error) {
+        show_error_dialog(ctx ? ctx->window : NULL, "Failed to start sandbox shell", error);
+        if (ctx && ctx->window) {
+            gtk_widget_destroy(GTK_WIDGET(ctx->window));
+        }
+        return;
+    }
+    (void)pid; // child-exited signal will close the window
+}
+
+static void on_terminal_mapped(GtkWidget *terminal, gpointer user_data) {
+    TerminalContext *ctx = user_data;
+
+    // Prevent double-spawn if the widget remaps
+    if (g_object_get_data(G_OBJECT(terminal), "spawned")) {
+        return;
+    }
+    g_object_set_data(G_OBJECT(terminal), "spawned", GINT_TO_POINTER(1));
+
+    if (!ctx || !ctx->sandbox_name) {
+        show_error_dialog(ctx ? ctx->window : NULL, "Sandbox name missing", NULL);
+        if (ctx && ctx->window) {
+            gtk_widget_destroy(GTK_WIDGET(ctx->window));
+        }
+        return;
+    }
+
+    const char *argv[] = {SANDBOX_BIN, "-e", "-s", ctx->sandbox_name, NULL};
+    char **envv = g_get_environ();
+
+    vte_terminal_spawn_async(VTE_TERMINAL(terminal),
+                             VTE_PTY_DEFAULT,
+                             NULL,               // inherit cwd
+                             (char *const *)argv,
+                             envv,               // inherit env
+                             G_SPAWN_SEARCH_PATH,
+                             NULL, NULL,         // child_setup
+                             NULL,               // cancellable
+                             -1,                 // default timeout
+                             NULL,               // cancellable
+                             on_spawn_ready,
+                             ctx);
+
+    g_strfreev(envv);
+}
+
+static void free_terminal_ctx(gpointer data) {
+    TerminalContext *ctx = data;
+    if (!ctx) return;
+    g_free(ctx->sandbox_name);
+    g_free(ctx);
 }
 
 void on_create_clicked(GtkButton *button, gpointer user_data) {
@@ -92,13 +210,25 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
         return;
     }
 
-    // Call CLI
-    char cmd[512];
-    sprintf(cmd, "./bin/sandbox -c -m %d -t %d %s -s %s", memory, cpu, network ? "-n" : "", name);
-    if (system(cmd) != 0) {
-        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to create sandbox");
-        gtk_dialog_run(GTK_DIALOG(dialog));
-        gtk_widget_destroy(dialog);
+    if (!ensure_root(NULL)) return;
+
+    // Build argv dynamically to avoid empty arguments
+    char *argv_cmd[10] = {0};
+    int idx = 0;
+    argv_cmd[idx++] = SANDBOX_BIN;
+    argv_cmd[idx++] = "-c";
+    argv_cmd[idx++] = "-m";
+    argv_cmd[idx++] = (char *)mem_str;
+    argv_cmd[idx++] = "-t";
+    argv_cmd[idx++] = (char *)cpu_str;
+    if (network) {
+        argv_cmd[idx++] = "-n";
+    }
+    argv_cmd[idx++] = "-s";
+    argv_cmd[idx++] = (char *)name;
+    argv_cmd[idx] = NULL;
+
+    if (!run_command(argv_cmd, NULL)) {
         return;
     }
 
@@ -129,6 +259,8 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
         return;
     }
 
+    if (!ensure_root(NULL)) return;
+
     GtkWidget *label = gtk_bin_get_child(GTK_BIN(row));
     const char *text = gtk_label_get_text(GTK_LABEL(label));
     char name[256];
@@ -137,7 +269,6 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Sandbox Terminal");
     gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
-    g_signal_connect(window, "destroy", G_CALLBACK(gtk_widget_destroy), NULL);
 
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_container_add(GTK_CONTAINER(window), box);
@@ -146,40 +277,20 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
     GtkWidget *terminal = vte_terminal_new();
     gtk_box_pack_start(GTK_BOX(box), terminal, TRUE, TRUE, 0);
 
+    // Prepare context for spawn callbacks
+    TerminalContext *ctx = g_new0(TerminalContext, 1);
+    ctx->window = GTK_WINDOW(window);
+    ctx->sandbox_name = g_strdup(name);
+    g_object_set_data_full(G_OBJECT(window), "terminal_ctx", ctx, free_terminal_ctx);
+
     // Connect to child-exited to close window when process exits
     g_signal_connect(terminal, "child-exited", G_CALLBACK(on_child_exited), window);
 
-    // Store the name in the window's user data for later use
-    g_object_set_data_full(G_OBJECT(window), "sandbox_name", g_strdup(name), g_free);
-
-    // Connect to the realize signal to spawn the terminal after the widget is realized
-    g_signal_connect(terminal, "realize", G_CALLBACK(on_terminal_realized), window);
+    // Spawn only after the widget is mapped (has a GdkWindow)
+    g_signal_connect(terminal, "map", G_CALLBACK(on_terminal_mapped), ctx);
 
     // Show all widgets after packing everything
     gtk_widget_show_all(window);
-}
-
-void on_terminal_realized(GtkWidget *terminal, gpointer user_data) {
-    GtkWidget *window = GTK_WIDGET(user_data);
-    char *name = g_object_get_data(G_OBJECT(window), "sandbox_name");
-
-    if (!name) {
-        g_warning("Sandbox name not found");
-        gtk_widget_destroy(window);
-        return;
-    }
-
-    // Spawn the sandbox
-    char *argv[] = {"./bin/sandbox", "-e", "-s", name, NULL};
-    GError *error = NULL;
-    vte_terminal_spawn_async(VTE_TERMINAL(terminal), VTE_PTY_DEFAULT, NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL, NULL, -1, NULL, NULL, &error);
-    if (error) {
-        fprintf(stderr, "Failed to spawn: %s\n", error->message);
-        g_error_free(error);
-        gtk_widget_destroy(window);
-    }
-
-
 }
 
 void on_clear_clicked(GtkButton *button, gpointer user_data) {
@@ -212,11 +323,11 @@ void on_delete_clicked(GtkButton *button, gpointer user_data) {
     gtk_widget_destroy(dialog);
 
     if (response == GTK_RESPONSE_YES) {
+        if (!ensure_root(NULL)) return;
+
         // Call delete
-        if (system("./bin/sandbox -d") != 0) {
-            GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Failed to delete sandbox");
-            gtk_dialog_run(GTK_DIALOG(dialog));
-            gtk_widget_destroy(dialog);
+        char *argv_cmd[] = {SANDBOX_BIN, "-d", NULL};
+        if (!run_command(argv_cmd, NULL)) {
             return;
         }
 
