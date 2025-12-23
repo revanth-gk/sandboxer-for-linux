@@ -15,9 +15,13 @@
 #include <sys/resource.h>
 #include <stdint.h>
 #include <time.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <errno.h>
 
 #define STACK_SIZE 1024 * 1024
 #define SANDBOX_ROOT "/tmp/sandbox_root"
+#define MAX_CMD 512
 
 static char child_stack[STACK_SIZE];
 
@@ -33,6 +37,133 @@ void log_action(const char *action) {
         fprintf(log, "%s\n", action);
         fclose(log);
     }
+}
+
+static void ensure_dns(void) {
+    struct stat st;
+    if (stat("/etc/resolv.conf", &st) == -1 || st.st_size == 0) {
+        FILE *f = fopen("/etc/resolv.conf", "w");
+        if (f) {
+            fputs("nameserver 8.8.8.8\n", f);
+            fclose(f);
+            log_action("Wrote default DNS to /etc/resolv.conf");
+        } else {
+            perror("fopen /etc/resolv.conf");
+        }
+    }
+}
+
+static void enable_ip_forward(void) {
+    int rc = system("sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1");
+    if (rc != 0) {
+        log_action("Failed to enable ip_forward");
+    } else {
+        log_action("Enabled ip_forward");
+    }
+}
+
+static void setup_nat_rules(void) {
+    const char *cmds[] = {
+        "iptables --table nat -A POSTROUTING -o eth0 -j MASQUERADE",
+        "iptables -A FORWARD -i eth0 -o eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT",
+        "iptables -A FORWARD -i eth0 -o eth0 -j ACCEPT",
+        NULL
+    };
+    for (int i = 0; cmds[i]; ++i) {
+        int rc = system(cmds[i]);
+        if (rc != 0) {
+            log_action("Failed to apply NAT rule");
+        }
+    }
+}
+
+static void ensure_file(const char *path) {
+    int fd = open(path, O_CREAT | O_RDONLY, 0644);
+    if (fd >= 0) close(fd);
+}
+
+static int mkdir_p(const char *path, mode_t mode) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    size_t len = strlen(tmp);
+    if (len == 0) return -1;
+    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, mode);
+            *p = '/';
+        }
+    }
+    return mkdir(tmp, mode);
+}
+
+static void install_host_packages(void) {
+    const char *cmd = "apt-get update && apt-get install -y iptables net-tools dnsutils sudo iproute2 curl wget";
+    int rc = system(cmd);
+    if (rc != 0) {
+        log_action("Package install failed");
+    } else {
+        log_action("Package install succeeded");
+    }
+}
+
+static void bind_host_tools(void) {
+    const char *dirs[] = {"/bin", "/usr/bin", "/usr/sbin", "/lib", "/lib64", "/usr/lib", "/usr/libexec", "/usr/lib/sudo", "/usr/libexec/sudo", NULL};
+    char target[MAX_CMD];
+    for (int i = 0; dirs[i]; ++i) {
+        snprintf(target, sizeof(target), SANDBOX_ROOT "%s", dirs[i]);
+        mkdir_p(target, 0755);
+        char cmd[MAX_CMD];
+        snprintf(cmd, sizeof(cmd), "mount --bind %s %s", dirs[i], target);
+        (void)system(cmd);
+    }
+    // bind resolv.conf if present
+    struct stat st;
+    if (stat("/etc/resolv.conf", &st) == 0) {
+        mkdir(SANDBOX_ROOT "/etc", 0755);
+        ensure_file(SANDBOX_ROOT "/etc/resolv.conf");
+        char cmd[MAX_CMD];
+        snprintf(cmd, sizeof(cmd), "mount --bind /etc/resolv.conf %s", SANDBOX_ROOT "/etc/resolv.conf");
+        (void)system(cmd);
+    }
+    // bind ld cache and configs
+    if (stat("/etc/ld.so.cache", &st) == 0) {
+        ensure_file(SANDBOX_ROOT "/etc/ld.so.cache");
+        char cmd[MAX_CMD];
+        snprintf(cmd, sizeof(cmd), "mount --bind /etc/ld.so.cache %s", SANDBOX_ROOT "/etc/ld.so.cache");
+        (void)system(cmd);
+    }
+    mkdir_p(SANDBOX_ROOT "/etc/ld.so.conf.d", 0755);
+    ensure_file(SANDBOX_ROOT "/etc/ld.so.conf");
+    (void)system("mount --bind /etc/ld.so.conf " SANDBOX_ROOT "/etc/ld.so.conf");
+    (void)system("mount --bind /etc/ld.so.conf.d " SANDBOX_ROOT "/etc/ld.so.conf.d");
+    // sudo/pam/passwd
+    ensure_file(SANDBOX_ROOT "/etc/sudoers");
+    (void)system("mount --bind /etc/sudoers " SANDBOX_ROOT "/etc/sudoers");
+    mkdir_p(SANDBOX_ROOT "/etc/pam.d", 0755);
+    (void)system("mount --bind /etc/pam.d " SANDBOX_ROOT "/etc/pam.d");
+    mkdir_p(SANDBOX_ROOT "/etc/security", 0755);
+    (void)system("mount --bind /etc/security " SANDBOX_ROOT "/etc/security");
+    ensure_file(SANDBOX_ROOT "/etc/nsswitch.conf");
+    (void)system("mount --bind /etc/nsswitch.conf " SANDBOX_ROOT "/etc/nsswitch.conf");
+    ensure_file(SANDBOX_ROOT "/etc/login.defs");
+    (void)system("mount --bind /etc/login.defs " SANDBOX_ROOT "/etc/login.defs");
+    ensure_file(SANDBOX_ROOT "/etc/passwd");
+    (void)system("mount --bind /etc/passwd " SANDBOX_ROOT "/etc/passwd");
+    ensure_file(SANDBOX_ROOT "/etc/group");
+    (void)system("mount --bind /etc/group " SANDBOX_ROOT "/etc/group");
+    ensure_file(SANDBOX_ROOT "/etc/shadow");
+    (void)system("mount --bind /etc/shadow " SANDBOX_ROOT "/etc/shadow");
+    mkdir_p(SANDBOX_ROOT "/var/run/sudo", 0700);
+    mkdir_p(SANDBOX_ROOT "/var/lib/sudo", 0700);
+    // bind SSL certificates
+    mkdir_p(SANDBOX_ROOT "/etc/ssl", 0755);
+    (void)system("mount --bind /etc/ssl " SANDBOX_ROOT "/etc/ssl");
+    mkdir_p(SANDBOX_ROOT "/usr/share/ca-certificates", 0755);
+    (void)system("mount --bind /usr/share/ca-certificates " SANDBOX_ROOT "/usr/share/ca-certificates");
+    mkdir_p(SANDBOX_ROOT "/etc/ca-certificates", 0755);
+    (void)system("mount --bind /etc/ca-certificates " SANDBOX_ROOT "/etc/ca-certificates");
 }
 
 int setup_sandbox(void *arg) {
@@ -69,6 +200,12 @@ int setup_sandbox(void *arg) {
         perror("mount dev");
         return 1;
     }
+    // Minimal device nodes
+    mknod("/dev/null", S_IFCHR | 0666, makedev(1, 3));
+    mknod("/dev/zero", S_IFCHR | 0666, makedev(1, 5));
+    mknod("/dev/random", S_IFCHR | 0666, makedev(1, 8));
+    mknod("/dev/urandom", S_IFCHR | 0666, makedev(1, 9));
+    mknod("/dev/tty", S_IFCHR | 0666, makedev(5, 0));
 
     // Set resource limits
     if (config) {
@@ -87,6 +224,12 @@ int setup_sandbox(void *arg) {
     }
 
     if (should_run_shell) {
+        // Ensure resolv.conf inside chroot
+        FILE *rf = fopen("/etc/resolv.conf", "w");
+        if (rf) {
+            fputs("nameserver 8.8.8.8\nnameserver 8.8.4.4\n", rf);
+            fclose(rf);
+        }
         // Run shell
         execl("/bin/busybox", "busybox", "sh", NULL);
         execl("/bin/sh", "sh", NULL);
@@ -96,8 +239,9 @@ int setup_sandbox(void *arg) {
     return 0;
 }
 
-void create_sandbox(int memory, int cpu, int network, char *name) {
+int create_sandbox(int memory, int cpu, int network, char *name) {
     log_action("Creating sandbox");
+    int rc = 0;
 
     // Prepare root dir
     mkdir(SANDBOX_ROOT, 0755);
@@ -105,45 +249,67 @@ void create_sandbox(int memory, int cpu, int network, char *name) {
     // Mount tmpfs
     if (mount("tmpfs", SANDBOX_ROOT, "tmpfs", 0, NULL) == -1) {
         perror("mount tmpfs");
-        return;
+        return 1;
     }
 
-    // Create bin dir
-    mkdir(SANDBOX_ROOT "/bin", 0755);
+    // Create initial dirs
+    mkdir_p(SANDBOX_ROOT "/bin", 0755);
+    mkdir_p(SANDBOX_ROOT "/usr/bin", 0755);
+    mkdir_p(SANDBOX_ROOT "/usr/sbin", 0755);
+    mkdir_p(SANDBOX_ROOT "/lib", 0755);
+    mkdir_p(SANDBOX_ROOT "/lib64", 0755);
+    mkdir_p(SANDBOX_ROOT "/usr/lib", 0755);
 
     // Copy busybox
     char cmd[256];
     sprintf(cmd, "cp /bin/busybox %s/bin/ 2>/dev/null || true", SANDBOX_ROOT);
     (void)system(cmd);
 
-    int flags = CLONE_NEWPID | CLONE_NEWUSER | CLONE_NEWNS | SIGCHLD;
+    if (network) {
+        if (getuid() != 0) {
+            fprintf(stderr, "Error: networked sandboxes require root (for iptables/sysctl).\n");
+            return 1;
+        }
+        ensure_dns();
+        enable_ip_forward();
+        setup_nat_rules();
+        install_host_packages();
+        bind_host_tools();
+    }
+
+    int flags = CLONE_NEWPID | CLONE_NEWNS | SIGCHLD;
     if (!network) {
-        flags |= CLONE_NEWNET;
+        flags |= CLONE_NEWUSER | CLONE_NEWNET; // isolate when no network
     }
 
     struct SandboxConfig config = {memory, cpu, network};
     pid_t pid = clone(setup_sandbox, child_stack + STACK_SIZE, flags, &config);
     if (pid == -1) {
         perror("clone");
-        return;
+        return 1;
     }
 
     // Map uid/gid for user namespace
-    char path[256];
-    sprintf(path, "/proc/%d/uid_map", pid);
-    FILE *f = fopen(path, "w");
-    if (f) {
-        fprintf(f, "0 %d 1\n", getuid());
-        fclose(f);
-    }
-    sprintf(path, "/proc/%d/gid_map", pid);
-    f = fopen(path, "w");
-    if (f) {
-        fprintf(f, "0 %d 1\n", getgid());
-        fclose(f);
+    if (flags & CLONE_NEWUSER) {
+        char path[256];
+        sprintf(path, "/proc/%d/uid_map", pid);
+        FILE *f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "0 %d 1\n", getuid());
+            fclose(f);
+        }
+        sprintf(path, "/proc/%d/gid_map", pid);
+        f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "0 %d 1\n", getgid());
+            fclose(f);
+        }
     }
 
-    waitpid(pid, NULL, 0);
+    if (waitpid(pid, NULL, 0) == -1) {
+        perror("waitpid");
+        rc = 1;
+    }
     log_action("Sandbox created");
 
     // Save config
@@ -155,9 +321,10 @@ void create_sandbox(int memory, int cpu, int network, char *name) {
             fclose(config_file);
         }
     }
+    return rc;
 }
 
-void enter_sandbox(char *name) {
+int enter_sandbox(char *name) {
     log_action("Entering sandbox");
 
     struct SandboxConfig config = {100, 10, 0}; // default
@@ -180,40 +347,62 @@ void enter_sandbox(char *name) {
         }
     }
 
+    if (config.network) {
+        if (getuid() != 0) {
+            fprintf(stderr, "Error: networked sandboxes require root (for iptables/sysctl).\n");
+            return 1;
+        }
+        ensure_dns();
+        enable_ip_forward();
+        setup_nat_rules();
+        install_host_packages();
+        bind_host_tools();
+    }
+
+    int flags = CLONE_NEWPID | CLONE_NEWNS | SIGCHLD;
+    if (!config.network) {
+        flags |= CLONE_NEWUSER | CLONE_NEWNET;
+    }
+
     // If already created, just clone and enter
-    pid_t pid = clone(setup_sandbox, child_stack + STACK_SIZE,
-                      CLONE_NEWPID | CLONE_NEWUSER | (config.network ? 0 : CLONE_NEWNET) | CLONE_NEWNS | SIGCHLD,
-                      &config);
+    pid_t pid = clone(setup_sandbox, child_stack + STACK_SIZE, flags, &config);
     if (pid == -1) {
         perror("clone");
-        return;
+        return 1;
     }
 
     // Map uid/gid for user namespace
-    char path[256];
-    sprintf(path, "/proc/%d/uid_map", pid);
-    FILE *f = fopen(path, "w");
-    if (f) {
-        fprintf(f, "0 %d 1\n", getuid());
-        fclose(f);
-    }
-    sprintf(path, "/proc/%d/gid_map", pid);
-    f = fopen(path, "w");
-    if (f) {
-        fprintf(f, "0 %d 1\n", getgid());
-        fclose(f);
+    if (flags & CLONE_NEWUSER) {
+        char path[256];
+        sprintf(path, "/proc/%d/uid_map", pid);
+        FILE *f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "0 %d 1\n", getuid());
+            fclose(f);
+        }
+        sprintf(path, "/proc/%d/gid_map", pid);
+        f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "0 %d 1\n", getgid());
+            fclose(f);
+        }
     }
 
-    waitpid(pid, NULL, 0);
+    if (waitpid(pid, NULL, 0) == -1) {
+        perror("waitpid");
+        return 1;
+    }
     log_action("Entered sandbox");
+    return 0;
 }
 
-void delete_sandbox() {
+int delete_sandbox() {
     log_action("Deleting sandbox");
     char cmd[256];
     sprintf(cmd, "umount %s 2>/dev/null || true", SANDBOX_ROOT);
     (void)system(cmd);
     rmdir(SANDBOX_ROOT);
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -266,13 +455,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
+    int rc = 0;
     if (create) {
-        create_sandbox(memory, cpu, network, name);
+        rc = create_sandbox(memory, cpu, network, name);
     } else if (enter) {
-        enter_sandbox(name);
+        rc = enter_sandbox(name);
     } else if (delete) {
-        delete_sandbox();
+        rc = delete_sandbox();
     }
     
-    return 0;
+    return rc;
 }

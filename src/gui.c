@@ -8,6 +8,7 @@
 
 #define CONFIG_FILE "/home/ubuntu/sandbox/sandboxes.txt"
 #define SANDBOX_BIN "/home/ubuntu/sandbox/bin/sandbox"
+#define LOG_FILE "/home/ubuntu/sandbox/gui.log"
 
 typedef struct {
     char name[256];
@@ -22,6 +23,8 @@ GtkWidget *scale_memory;
 GtkWidget *scale_cpu;
 GtkWidget *check_network;
 GtkWidget *listbox;
+GtkWidget *log_view;
+GQueue *log_buffer = NULL;
 GList *sandboxes = NULL;
 
 typedef struct {
@@ -29,12 +32,23 @@ typedef struct {
     char *sandbox_name;
 } TerminalContext;
 
+typedef struct {
+    GtkWidget *row;
+    GtkWidget *name_label;
+    GtkWidget *mem_bar;
+    GtkWidget *cpu_bar;
+    GtkWidget *net_label;
+    Sandbox *sandbox;
+} RowWidgets;
+
 static gboolean refresh_usage_cb(gpointer user_data);
 static gboolean get_usage_for(const char *name, double *cpu, double *mem);
 static void on_terminal_mapped(GtkWidget *terminal, gpointer user_data);
 static void on_spawn_ready(VteTerminal *terminal, GPid pid, GError *error, gpointer user_data);
 static void show_error_dialog(GtkWindow *parent, const char *msg, GError *err);
 static void free_terminal_ctx(gpointer data);
+static void log_gui_event(const char *level, const char *sandbox, const char *message);
+static void update_log_view(void);
 
 void load_sandboxes() {
     FILE *f = fopen(CONFIG_FILE, "r");
@@ -109,13 +123,39 @@ void update_list() {
         Sandbox *s = l->data;
         char buf[512];
         strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&s->date));
-        GtkWidget *label = gtk_label_new(NULL);
-        char text[1024];
-        sprintf(text, "Name: %s, Memory: %d MB, CPU: %d s, Network: %s, Date: %s, Usage: N/A",
-                s->name, s->memory, s->cpu, s->network ? "Yes" : "No", buf);
-        gtk_label_set_text(GTK_LABEL(label), text);
-        g_object_set_data(G_OBJECT(label), "sandbox_ptr", s);
-        gtk_list_box_insert(GTK_LIST_BOX(listbox), label, -1);
+        GtkWidget *row_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+
+        GtkWidget *name = gtk_label_new(s->name);
+        gtk_box_pack_start(GTK_BOX(row_box), name, FALSE, FALSE, 0);
+
+        GtkWidget *mem_bar = gtk_progress_bar_new();
+        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(mem_bar), "Memory: N/A");
+        gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(mem_bar), TRUE);
+        gtk_widget_set_hexpand(mem_bar, TRUE);
+        gtk_box_pack_start(GTK_BOX(row_box), mem_bar, TRUE, TRUE, 0);
+
+        GtkWidget *cpu_bar = gtk_progress_bar_new();
+        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(cpu_bar), "CPU: N/A");
+        gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(cpu_bar), TRUE);
+        gtk_widget_set_hexpand(cpu_bar, TRUE);
+        gtk_box_pack_start(GTK_BOX(row_box), cpu_bar, TRUE, TRUE, 0);
+
+        GtkWidget *net_label = gtk_label_new(s->network ? "Net: On" : "Net: Off");
+        gtk_box_pack_start(GTK_BOX(row_box), net_label, FALSE, FALSE, 0);
+
+        GtkWidget *row = gtk_list_box_row_new();
+        gtk_container_add(GTK_CONTAINER(row), row_box);
+
+        RowWidgets *rw = g_new0(RowWidgets, 1);
+        rw->row = row;
+        rw->name_label = name;
+        rw->mem_bar = mem_bar;
+        rw->cpu_bar = cpu_bar;
+        rw->net_label = net_label;
+        rw->sandbox = s;
+        g_object_set_data_full(G_OBJECT(row), "row_widgets", rw, g_free);
+
+        gtk_list_box_insert(GTK_LIST_BOX(listbox), row, -1);
     }
     gtk_widget_show_all(listbox);
 }
@@ -138,12 +178,14 @@ static void on_spawn_ready(VteTerminal *terminal, GPid pid, GError *error, gpoin
     TerminalContext *ctx = user_data;
     if (error) {
         show_error_dialog(ctx ? ctx->window : NULL, "Failed to start sandbox shell", error);
+        log_gui_event("ERROR", ctx ? ctx->sandbox_name : NULL, error->message);
         if (ctx && ctx->window) {
             gtk_widget_destroy(GTK_WIDGET(ctx->window));
         }
         return;
     }
     (void)pid; // child-exited signal will close the window
+    log_gui_event("INFO", ctx ? ctx->sandbox_name : NULL, "Spawned sandbox terminal");
 }
 
 static void on_terminal_mapped(GtkWidget *terminal, gpointer user_data) {
@@ -187,6 +229,42 @@ static void free_terminal_ctx(gpointer data) {
     if (!ctx) return;
     g_free(ctx->sandbox_name);
     g_free(ctx);
+}
+
+static void update_log_view(void) {
+    if (!log_view || !log_buffer) return;
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(log_view));
+    gtk_text_buffer_set_text(buffer, "", -1);
+    GtkTextIter iter;
+    gtk_text_buffer_get_end_iter(buffer, &iter);
+    for (GList *l = log_buffer->head; l; l = l->next) {
+        const char *line = l->data;
+        gtk_text_buffer_insert(buffer, &iter, line, -1);
+        gtk_text_buffer_insert(buffer, &iter, "\n", -1);
+    }
+}
+
+static void log_gui_event(const char *level, const char *sandbox, const char *message) {
+    if (!log_buffer) return;
+    char ts[64];
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
+    char line[512];
+    snprintf(line, sizeof(line), "[%s] %s %s %s", ts, level ? level : "INFO", sandbox ? sandbox : "-", message ? message : "");
+
+    g_queue_push_tail(log_buffer, g_strdup(line));
+    while (g_queue_get_length(log_buffer) > 200) {
+        char *old = g_queue_pop_head(log_buffer);
+        g_free(old);
+    }
+
+    FILE *f = fopen(LOG_FILE, "a");
+    if (f) {
+        fprintf(f, "%s\n", line);
+        fclose(f);
+    }
+    update_log_view();
 }
 
 void on_create_clicked(GtkButton *button, gpointer user_data) {
@@ -256,6 +334,7 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     sandboxes = g_list_append(sandboxes, s);
     save_sandboxes();
     update_list();
+    log_gui_event("INFO", name, "Created sandbox");
 }
 
 void on_child_exited(VteTerminal *terminal, int status, gpointer user_data) {
@@ -275,10 +354,11 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
 
     if (!ensure_root(NULL)) return;
 
-    GtkWidget *label = gtk_bin_get_child(GTK_BIN(row));
-    const char *text = gtk_label_get_text(GTK_LABEL(label));
+    RowWidgets *rw = g_object_get_data(G_OBJECT(row), "row_widgets");
+    if (!rw || !rw->sandbox) return;
     char name[256];
-    sscanf(text, "Name: %[^,]", name);
+    strncpy(name, rw->sandbox->name, sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
 
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Sandbox Terminal");
@@ -327,10 +407,11 @@ void on_delete_clicked(GtkButton *button, gpointer user_data) {
         return;
     }
 
-    GtkWidget *label = gtk_bin_get_child(GTK_BIN(row));
-    const char *text = gtk_label_get_text(GTK_LABEL(label));
+    RowWidgets *rw = g_object_get_data(G_OBJECT(row), "row_widgets");
+    if (!rw || !rw->sandbox) return;
     char name[256];
-    sscanf(text, "Name: %[^,]", name);
+    strncpy(name, rw->sandbox->name, sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
 
     GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO, "Are you sure you want to delete the sandbox '%s'?", name);
     int response = gtk_dialog_run(GTK_DIALOG(dialog));
@@ -356,26 +437,41 @@ void on_delete_clicked(GtkButton *button, gpointer user_data) {
         }
         save_sandboxes();
         update_list();
+        log_gui_event("INFO", name, "Deleted sandbox");
     }
 }
 
-static gboolean get_usage_for(const char *name, double *cpu, double *mem) {
-    if (!name || !cpu || !mem) return FALSE;
+static gboolean get_usage_for(const char *name, double *cpu_percent, double *mem_percent) {
+    if (!name || !cpu_percent || !mem_percent) return FALSE;
     FILE *fp = popen("ps -eo pid,%cpu,%mem,cmd", "r");
     if (!fp) return FALSE;
-    char line[1024];
-    // skip header
-    if (!fgets(line, sizeof(line), fp)) {
+    char line[2048];
+    if (!fgets(line, sizeof(line), fp)) { // skip header
         pclose(fp);
         return FALSE;
     }
     gboolean found = FALSE;
     while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, name)) {
+        if (!strstr(line, name)) continue;
+        if (!(strstr(line, SANDBOX_BIN) || strstr(line, "-s"))) continue;
+        double c = 0.0, m = 0.0;
+        if (sscanf(line, "%*d %lf %lf", &c, &m) == 2) {
+            *cpu_percent = c;
+            *mem_percent = m;
+            found = TRUE;
+            break;
+        }
+    }
+    // Fallback: any process line that contains the name
+    if (!found) {
+        rewind(fp);
+        if (fgets(line, sizeof(line), fp)) { /* skip header */ }
+        while (fgets(line, sizeof(line), fp)) {
+            if (!strstr(line, name)) continue;
             double c = 0.0, m = 0.0;
             if (sscanf(line, "%*d %lf %lf", &c, &m) == 2) {
-                *cpu = c;
-                *mem = m;
+                *cpu_percent = c;
+                *mem_percent = m;
                 found = TRUE;
                 break;
             }
@@ -385,29 +481,61 @@ static gboolean get_usage_for(const char *name, double *cpu, double *mem) {
     return found;
 }
 
+static double system_total_mem_mb(void) {
+    FILE *fp = fopen("/proc/meminfo", "r");
+    if (!fp) return 0.0;
+    char key[64];
+    long value_kb = 0;
+    while (fscanf(fp, "%63s %ld kB\n", key, &value_kb) == 2) {
+        if (strcmp(key, "MemTotal:") == 0) {
+            fclose(fp);
+            return value_kb / 1024.0;
+        }
+    }
+    fclose(fp);
+    return 0.0;
+}
+
 static gboolean refresh_usage_cb(gpointer user_data) {
     (void)user_data;
+    double total_mem_mb = system_total_mem_mb();
     GList *rows = gtk_container_get_children(GTK_CONTAINER(listbox));
     for (GList *r = rows; r; r = r->next) {
         GtkListBoxRow *row = GTK_LIST_BOX_ROW(r->data);
-        GtkWidget *label = gtk_bin_get_child(GTK_BIN(row));
-        Sandbox *s = g_object_get_data(G_OBJECT(label), "sandbox_ptr");
-        if (!s) continue;
-        double cpu = 0.0, mem = 0.0;
-        gboolean ok = get_usage_for(s->name, &cpu, &mem);
-        char buf_date[512];
-        strftime(buf_date, sizeof(buf_date), "%Y-%m-%d %H:%M:%S", localtime(&s->date));
-        char text[1024];
-        if (ok) {
-            snprintf(text, sizeof(text),
-                     "Name: %s, Memory: %d MB, CPU: %d s, Network: %s, Date: %s, Usage: CPU %.1f%%, MEM %.1f%%",
-                     s->name, s->memory, s->cpu, s->network ? "Yes" : "No", buf_date, cpu, mem);
-        } else {
-            snprintf(text, sizeof(text),
-                     "Name: %s, Memory: %d MB, CPU: %d s, Network: %s, Date: %s, Usage: N/A",
-                     s->name, s->memory, s->cpu, s->network ? "Yes" : "No", buf_date);
+        RowWidgets *rw = g_object_get_data(G_OBJECT(row), "row_widgets");
+        if (!rw || !rw->sandbox) continue;
+        double cpu = 0.0, mem_percent = 0.0;
+        gboolean ok = get_usage_for(rw->sandbox->name, &cpu, &mem_percent);
+        double mem_mb = 0.0;
+        if (ok && total_mem_mb > 0.0) {
+            mem_mb = mem_percent * total_mem_mb / 100.0;
         }
-        gtk_label_set_text(GTK_LABEL(label), text);
+        // CPU bar
+        if (ok) {
+            double cpu_frac = cpu / 100.0;
+            if (cpu_frac > 1.0) cpu_frac = 1.0;
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(rw->cpu_bar), cpu_frac);
+            char cpu_txt[64];
+            snprintf(cpu_txt, sizeof(cpu_txt), "CPU: %.1f%%", cpu);
+            gtk_progress_bar_set_text(GTK_PROGRESS_BAR(rw->cpu_bar), cpu_txt);
+        } else {
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(rw->cpu_bar), 0.0);
+            gtk_progress_bar_set_text(GTK_PROGRESS_BAR(rw->cpu_bar), "CPU: N/A");
+        }
+        // Memory bar
+        if (ok && total_mem_mb > 0.0) {
+            double mem_frac = mem_percent / 100.0;
+            if (mem_frac > 1.0) mem_frac = 1.0;
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(rw->mem_bar), mem_frac);
+            char mem_txt[64];
+            snprintf(mem_txt, sizeof(mem_txt), "Mem: %.1f MB (%.1f%%)", mem_mb, mem_percent);
+            gtk_progress_bar_set_text(GTK_PROGRESS_BAR(rw->mem_bar), mem_txt);
+        } else {
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(rw->mem_bar), 0.0);
+            gtk_progress_bar_set_text(GTK_PROGRESS_BAR(rw->mem_bar), "Mem: N/A");
+        }
+        // Network label stays static
+        gtk_label_set_text(GTK_LABEL(rw->net_label), rw->sandbox->network ? "Net: On" : "Net: Off");
     }
     g_list_free(rows);
     return TRUE;
@@ -423,12 +551,17 @@ int main(int argc, char *argv[]) {
     gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
-    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_container_add(GTK_CONTAINER(window), vbox);
+    log_buffer = g_queue_new();
+
+    GtkWidget *notebook = gtk_notebook_new();
+    gtk_container_add(GTK_CONTAINER(window), notebook);
+
+    GtkWidget *manager_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), manager_box, gtk_label_new("Sandboxes"));
 
     // Input fields
     GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(manager_box), hbox, FALSE, FALSE, 0);
 
     GtkWidget *label = gtk_label_new("Name:");
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
@@ -436,7 +569,7 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(hbox), entry_name, TRUE, TRUE, 0);
 
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(manager_box), hbox, FALSE, FALSE, 0);
 
     label = gtk_label_new("Memory (MB):");
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
@@ -446,7 +579,7 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(hbox), scale_memory, TRUE, TRUE, 0);
 
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(manager_box), hbox, FALSE, FALSE, 0);
 
     label = gtk_label_new("CPU (sec):");
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
@@ -456,10 +589,10 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(hbox), scale_cpu, TRUE, TRUE, 0);
 
     check_network = gtk_check_button_new_with_label("Enable Network");
-    gtk_box_pack_start(GTK_BOX(vbox), check_network, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(manager_box), check_network, FALSE, FALSE, 0);
 
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(manager_box), hbox, FALSE, FALSE, 0);
 
     GtkWidget *btn_create = gtk_button_new_with_label("Create Sandbox");
     g_signal_connect(btn_create, "clicked", G_CALLBACK(on_create_clicked), NULL);
@@ -480,12 +613,29 @@ int main(int argc, char *argv[]) {
     // List
     GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_box_pack_start(GTK_BOX(vbox), scrolled, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(manager_box), scrolled, TRUE, TRUE, 0);
 
     listbox = gtk_list_box_new();
     gtk_container_add(GTK_CONTAINER(scrolled), listbox);
     update_list();
     g_timeout_add_seconds(2, refresh_usage_cb, NULL);
+
+    // Logs tab
+    GtkWidget *logs_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    GtkWidget *log_scrolled = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(log_scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    log_view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(log_view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(log_view), FALSE);
+    gtk_container_add(GTK_CONTAINER(log_scrolled), log_view);
+    gtk_box_pack_start(GTK_BOX(logs_box), log_scrolled, TRUE, TRUE, 0);
+
+    GtkWidget *log_hint = gtk_label_new("Logs are also written to " LOG_FILE);
+    gtk_box_pack_start(GTK_BOX(logs_box), log_hint, FALSE, FALSE, 0);
+
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), logs_box, gtk_label_new("Logs"));
+
+    update_log_view();
 
     gtk_widget_show_all(window);
     gtk_main();
