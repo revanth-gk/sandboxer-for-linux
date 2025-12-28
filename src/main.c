@@ -21,7 +21,7 @@
 
 #define STACK_SIZE 1024 * 1024
 #define SANDBOX_ROOT "/tmp/sandbox_root"
-#define MAX_CMD 512
+#define MAX_CMD 1024
 
 static char child_stack[STACK_SIZE];
 
@@ -544,6 +544,18 @@ static void bind_host_tools(void) {
     mkdir_p(SANDBOX_ROOT "/usr/share/locale", 0755);
     (void)system("mount --bind /usr/share/locale " SANDBOX_ROOT "/usr/share/locale 2>/dev/null || true");
     
+    // ===== SYSTEM DIRECTORIES FOR DPKG/APT =====
+    // Bind /sys for CPU info - FIXES "Error reading the CPU table"
+    mkdir_p(SANDBOX_ROOT "/sys", 0755);
+    (void)system("mount --bind /sys " SANDBOX_ROOT "/sys");
+    
+    // Bind /run for various system utilities
+    mkdir_p(SANDBOX_ROOT "/run", 0755);
+    (void)system("mount --bind /run " SANDBOX_ROOT "/run 2>/dev/null || true");
+    
+    // Bind /tmp for apt/dpkg temp files
+    mkdir_p(SANDBOX_ROOT "/tmp", 0755);
+    
     log_action("Network sandbox fully configured with apt support");
 }
 
@@ -581,14 +593,22 @@ int setup_sandbox(void *arg) {
     // Create directories
     mkdir("bin", 0755);
     mkdir("proc", 0755);
+    mkdir("sys", 0755);
     mkdir("tmp", 0755);
     mkdir("dev", 0755);
     mkdir("etc", 0755);
+    mkdir("run", 0755);
 
     // Mount proc
     if (mount("proc", "/proc", "proc", 0, NULL) == -1) {
         perror("mount proc");
         return 1;
+    }
+    
+    // Mount sysfs for CPU info (needed by dpkg)
+    if (mount("sysfs", "/sys", "sysfs", 0, NULL) == -1) {
+        // Not fatal, some systems might not support this
+        perror("mount sysfs (non-fatal)");
     }
 
     // Mount dev

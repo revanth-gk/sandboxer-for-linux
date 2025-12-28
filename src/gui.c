@@ -119,7 +119,7 @@ static gboolean run_command(char *const argv[], GtkWindow *parent) {
     gchar *stderr_str = NULL;
     gint status = 0;
     gboolean ok = g_spawn_sync(NULL,
-                               argv,
+                               (gchar **)argv,
                                NULL,
                                G_SPAWN_SEARCH_PATH,
                                NULL,
@@ -204,6 +204,8 @@ static void show_error_dialog(GtkWindow *parent, const char *msg, GError *err) {
 }
 
 static void on_spawn_ready(VteTerminal *terminal, GPid pid, GError *error, gpointer user_data) {
+    (void)terminal; // Unused parameter
+    (void)pid;      // Unused parameter
     TerminalContext *ctx = user_data;
     if (error) {
         show_error_dialog(ctx ? ctx->window : NULL, "Failed to start sandbox shell", error);
@@ -240,7 +242,7 @@ static void on_terminal_mapped(GtkWidget *terminal, gpointer user_data) {
     vte_terminal_spawn_async(VTE_TERMINAL(terminal),
                              VTE_PTY_DEFAULT,
                              NULL,               // inherit cwd
-                             (char *const *)argv,
+                             (char **)argv,
                              envv,               // inherit env
                              G_SPAWN_SEARCH_PATH,
                              NULL, NULL,         // child_setup
@@ -367,6 +369,8 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
 }
 
 void on_child_exited(VteTerminal *terminal, int status, gpointer user_data) {
+    (void)terminal; // Unused
+    (void)status;   // Unused
     gtk_widget_destroy(GTK_WIDGET(user_data));
 }
 
@@ -586,7 +590,7 @@ static void init_paths(const char *argv0) {
     // Go up one directory for config and log files
     char parent_dir[PATH_MAX];
     snprintf(parent_dir, sizeof(parent_dir), "%s/..", dir);
-    char resolved_parent[PATH_MAX];
+    char resolved_parent[PATH_MAX - 32];  // Leave room for filename
     if (realpath(parent_dir, resolved_parent) != NULL) {
         snprintf(g_config_file, sizeof(g_config_file), "%s/sandboxes.txt", resolved_parent);
         snprintf(g_log_file, sizeof(g_log_file), "%s/gui.log", resolved_parent);
@@ -835,7 +839,7 @@ static void update_sandbox_details(Sandbox *s) {
     
     gtk_widget_show(detail_panel);
     
-    char buf[256];
+    char buf[512];  // Larger buffer for name + markup
     snprintf(buf, sizeof(buf), "<b>%s</b>", s->name);
     gtk_label_set_markup(GTK_LABEL(detail_name_label), buf);
     
