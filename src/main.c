@@ -328,16 +328,29 @@ static void bind_essential_libs(void) {
         "/bin/ls", "/bin/cat", "/bin/echo", "/bin/pwd", "/bin/mkdir",
         "/bin/rm", "/bin/cp", "/bin/mv", "/bin/touch", "/bin/chmod",
         "/bin/chown", "/bin/ln", "/bin/readlink", "/bin/date", "/bin/sleep",
+        "/bin/dd", "/bin/df", "/bin/du", "/bin/uname", "/bin/hostname",
         // Terminal utilities - IMPORTANT for clear command
         "/usr/bin/clear", "/usr/bin/reset", "/usr/bin/tput", "/usr/bin/tset",
         "/bin/stty",
-        // Text utilities
-        "/usr/bin/grep", "/bin/grep", "/usr/bin/sed", "/bin/sed",
+        // TEXT EDITORS - ESSENTIAL for editing files
+        "/usr/bin/nano", "/bin/nano",
+        "/usr/bin/vim", "/usr/bin/vi", "/bin/vi", "/usr/bin/vim.basic", "/usr/bin/vim.tiny",
+        "/usr/bin/less", "/usr/bin/more", "/bin/more",
+        "/usr/bin/editor",  // Debian's default editor link
+        // Text processing utilities
+        "/usr/bin/grep", "/bin/grep", "/usr/bin/egrep", "/usr/bin/fgrep",
+        "/usr/bin/sed", "/bin/sed",
         "/usr/bin/head", "/usr/bin/tail", "/usr/bin/wc", "/usr/bin/sort",
-        "/usr/bin/cut", "/usr/bin/tr", "/usr/bin/awk",
+        "/usr/bin/cut", "/usr/bin/tr", "/usr/bin/awk", "/usr/bin/gawk",
+        "/usr/bin/xargs", "/usr/bin/find", "/bin/find",
+        "/usr/bin/file", "/usr/bin/stat",
         // User utilities
         "/usr/bin/env", "/usr/bin/id", "/usr/bin/whoami", "/usr/bin/groups",
         "/usr/bin/which", "/usr/bin/dirname", "/usr/bin/basename",
+        "/usr/bin/realpath", "/usr/bin/readlink",
+        // Process utilities
+        "/bin/ps", "/usr/bin/ps", "/bin/kill", "/usr/bin/kill",
+        "/usr/bin/pgrep", "/usr/bin/pkill",
         NULL
     };
     for (int i = 0; utils[i]; ++i) {
@@ -456,6 +469,23 @@ static void bind_host_tools(void) {
     (void)system("mount --bind /usr/share/ca-certificates " SANDBOX_ROOT "/usr/share/ca-certificates");
     mkdir_p(SANDBOX_ROOT "/etc/ca-certificates", 0755);
     (void)system("mount --bind /etc/ca-certificates " SANDBOX_ROOT "/etc/ca-certificates");
+    
+    // bind hostname for sudo to resolve host
+    ensure_file(SANDBOX_ROOT "/etc/hostname");
+    (void)system("mount --bind /etc/hostname " SANDBOX_ROOT "/etc/hostname");
+    ensure_file(SANDBOX_ROOT "/etc/hosts");
+    (void)system("mount --bind /etc/hosts " SANDBOX_ROOT "/etc/hosts");
+    
+    // Setup PTY for sudo - CRITICAL for "unable to allocate pty" error
+    mkdir_p(SANDBOX_ROOT "/dev/pts", 0755);
+    (void)system("mount -t devpts devpts " SANDBOX_ROOT "/dev/pts -o gid=5,mode=620,ptmxmode=000");
+    // Create ptmx device
+    (void)system("rm -f " SANDBOX_ROOT "/dev/ptmx 2>/dev/null");
+    (void)system("mknod " SANDBOX_ROOT "/dev/ptmx c 5 2 2>/dev/null || true");
+    (void)system("chmod 666 " SANDBOX_ROOT "/dev/ptmx 2>/dev/null || true");
+    // Alternative: link ptmx to pts/ptmx
+    (void)system("ln -sf pts/ptmx " SANDBOX_ROOT "/dev/ptmx 2>/dev/null || true");
+    
     // bind terminfo for clear, reset, etc. to work
     mkdir_p(SANDBOX_ROOT "/usr/share/terminfo", 0755);
     (void)system("mount --bind /usr/share/terminfo " SANDBOX_ROOT "/usr/share/terminfo");
@@ -518,6 +548,21 @@ int setup_sandbox(void *arg) {
     mknod("/dev/random", S_IFCHR | 0666, makedev(1, 8));
     mknod("/dev/urandom", S_IFCHR | 0666, makedev(1, 9));
     mknod("/dev/tty", S_IFCHR | 0666, makedev(5, 0));
+    
+    // PTY devices - REQUIRED for sudo and proper terminal
+    mkdir("/dev/pts", 0755);
+    if (mount("devpts", "/dev/pts", "devpts", 0, "gid=5,mode=620,ptmxmode=666") == -1) {
+        // Try without options if first attempt fails
+        mount("devpts", "/dev/pts", "devpts", 0, NULL);
+    }
+    mknod("/dev/ptmx", S_IFCHR | 0666, makedev(5, 2));
+    // Also create console device
+    mknod("/dev/console", S_IFCHR | 0600, makedev(5, 1));
+    // Create stdin/stdout/stderr symlinks
+    symlink("/proc/self/fd", "/dev/fd");
+    symlink("/proc/self/fd/0", "/dev/stdin");
+    symlink("/proc/self/fd/1", "/dev/stdout");
+    symlink("/proc/self/fd/2", "/dev/stderr");
 
     // Set resource limits (only if memory > 0 to avoid killing process immediately)
     if (config) {
@@ -541,13 +586,41 @@ int setup_sandbox(void *arg) {
     }
 
     if (should_run_shell) {
-        // Ensure resolv.conf inside chroot
+        // Ensure essential config files inside chroot
         mkdir("/etc", 0755);
+        
+        // DNS resolver
         FILE *rf = fopen("/etc/resolv.conf", "w");
         if (rf) {
             fputs("nameserver 8.8.8.8\nnameserver 8.8.4.4\n", rf);
             fclose(rf);
         }
+        
+        // Hostname - needed for sudo
+        char hostname[256] = "sandbox";
+        gethostname(hostname, sizeof(hostname));
+        FILE *hf = fopen("/etc/hostname", "w");
+        if (hf) {
+            fprintf(hf, "%s\n", hostname);
+            fclose(hf);
+        }
+        
+        // Hosts file - needed for hostname resolution
+        FILE *hosts = fopen("/etc/hosts", "w");
+        if (hosts) {
+            fprintf(hosts, "127.0.0.1 localhost\n");
+            fprintf(hosts, "127.0.0.1 %s\n", hostname);
+            fprintf(hosts, "::1 localhost ip6-localhost ip6-loopback\n");
+            fclose(hosts);
+        }
+        
+        // Set environment variables for terminal and paths
+        setenv("TERM", "xterm", 0);  // Don't override if already set
+        setenv("TERMINFO", "/usr/share/terminfo", 1);
+        setenv("PATH", "/bin:/usr/bin:/sbin:/usr/sbin", 1);
+        setenv("HOME", "/", 1);
+        setenv("USER", "root", 1);
+        setenv("SHELL", "/bin/sh", 1);
         
         // Try multiple shells in order of preference
         const char *shells[] = {
