@@ -216,8 +216,9 @@ static void bind_essential_libs(void) {
         }
     }
     
-    // Copy essential C library files
+    // Copy essential C library files - including SELinux and PCRE
     const char *libc_paths[] = {
+        // Core C library
         "/lib/x86_64-linux-gnu/libc.so.6",
         "/lib/x86_64-linux-gnu/libm.so.6",
         "/lib/x86_64-linux-gnu/libpthread.so.0",
@@ -226,13 +227,35 @@ static void bind_essential_libs(void) {
         "/lib/x86_64-linux-gnu/libresolv.so.2",
         "/lib/x86_64-linux-gnu/libnss_files.so.2",
         "/lib/x86_64-linux-gnu/libnss_dns.so.2",
+        // Terminal/ncurses
         "/lib/x86_64-linux-gnu/libtinfo.so.6",
         "/lib/x86_64-linux-gnu/libncurses.so.6",
+        "/lib/x86_64-linux-gnu/libncursesw.so.6",
+        "/usr/lib/x86_64-linux-gnu/libtinfo.so.6",
+        "/usr/lib/x86_64-linux-gnu/libncurses.so.6",
+        "/usr/lib/x86_64-linux-gnu/libncursesw.so.6",
+        // SELinux (required by ls, etc.)
+        "/lib/x86_64-linux-gnu/libselinux.so.1",
+        "/usr/lib/x86_64-linux-gnu/libselinux.so.1",
+        // PCRE (required by libselinux)
+        "/lib/x86_64-linux-gnu/libpcre.so.3",
+        "/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+        "/usr/lib/x86_64-linux-gnu/libpcre.so.3",
+        "/usr/lib/x86_64-linux-gnu/libpcre2-8.so.0",
+        // Other commonly needed libs
+        "/lib/x86_64-linux-gnu/libcap.so.2",
+        "/lib/x86_64-linux-gnu/libattr.so.1",
+        "/lib/x86_64-linux-gnu/libacl.so.1",
+        "/lib/x86_64-linux-gnu/libgcc_s.so.1",
+        // lib64 versions
         "/lib64/libc.so.6",
         "/lib64/libm.so.6",
         "/lib64/libpthread.so.0",
         "/lib64/libdl.so.2",
         "/lib64/libtinfo.so.6",
+        "/lib64/libselinux.so.1",
+        "/lib64/libpcre.so.3",
+        "/lib64/libpcre2-8.so.0",
         NULL
     };
     for (int i = 0; libc_paths[i]; ++i) {
@@ -299,11 +322,22 @@ static void bind_essential_libs(void) {
         }
     }
     
-    // Copy basic utilities
+    // Copy basic utilities WITH their dependencies
     const char *utils[] = {
+        // Core file utilities
         "/bin/ls", "/bin/cat", "/bin/echo", "/bin/pwd", "/bin/mkdir",
         "/bin/rm", "/bin/cp", "/bin/mv", "/bin/touch", "/bin/chmod",
-        "/usr/bin/env", "/usr/bin/id", "/usr/bin/whoami",
+        "/bin/chown", "/bin/ln", "/bin/readlink", "/bin/date", "/bin/sleep",
+        // Terminal utilities - IMPORTANT for clear command
+        "/usr/bin/clear", "/usr/bin/reset", "/usr/bin/tput", "/usr/bin/tset",
+        "/bin/stty",
+        // Text utilities
+        "/usr/bin/grep", "/bin/grep", "/usr/bin/sed", "/bin/sed",
+        "/usr/bin/head", "/usr/bin/tail", "/usr/bin/wc", "/usr/bin/sort",
+        "/usr/bin/cut", "/usr/bin/tr", "/usr/bin/awk",
+        // User utilities
+        "/usr/bin/env", "/usr/bin/id", "/usr/bin/whoami", "/usr/bin/groups",
+        "/usr/bin/which", "/usr/bin/dirname", "/usr/bin/basename",
         NULL
     };
     for (int i = 0; utils[i]; ++i) {
@@ -315,14 +349,52 @@ static void bind_essential_libs(void) {
                 *last_slash = '\0';
                 mkdir_p(target_dir, 0755);
             }
+            // Copy the binary
             snprintf(cmd, sizeof(cmd), "cp -L %s %s%s 2>/dev/null || true", 
                     utils[i], SANDBOX_ROOT, utils[i]);
+            (void)system(cmd);
+            
+            // Copy its library dependencies
+            snprintf(cmd, sizeof(cmd), 
+                "ldd %s 2>/dev/null | grep -oE '/[^ ]+' | while read lib; do "
+                "mkdir -p %s$(dirname \"$lib\") 2>/dev/null; "
+                "cp -Ln \"$lib\" %s\"$lib\" 2>/dev/null; done || true", 
+                utils[i], SANDBOX_ROOT, SANDBOX_ROOT);
             (void)system(cmd);
         }
     }
     
+    // Copy terminfo database for clear, reset, etc. to work
+    mkdir_p(SANDBOX_ROOT "/usr/share/terminfo", 0755);
+    mkdir_p(SANDBOX_ROOT "/lib/terminfo", 0755);
+    mkdir_p(SANDBOX_ROOT "/etc/terminfo", 0755);
+    
+    const char *terminfo_paths[] = {"/usr/share/terminfo", "/lib/terminfo", "/etc/terminfo", NULL};
+    for (int i = 0; terminfo_paths[i]; ++i) {
+        if (stat(terminfo_paths[i], &st) == 0) {
+            snprintf(cmd, sizeof(cmd), "cp -rL %s/* %s/usr/share/terminfo/ 2>/dev/null || true", 
+                    terminfo_paths[i], SANDBOX_ROOT);
+            (void)system(cmd);
+        }
+    }
+    
+    // Copy /etc/passwd and /etc/group for user utilities
+    snprintf(cmd, sizeof(cmd), "cp /etc/passwd %s/etc/ 2>/dev/null || true", SANDBOX_ROOT);
+    (void)system(cmd);
+    snprintf(cmd, sizeof(cmd), "cp /etc/group %s/etc/ 2>/dev/null || true", SANDBOX_ROOT);
+    (void)system(cmd);
+    
+    // Create /etc/profile to set TERM and TERMINFO
+    FILE *profile = fopen(SANDBOX_ROOT "/etc/profile", "w");
+    if (profile) {
+        fprintf(profile, "export TERM=${TERM:-xterm}\n");
+        fprintf(profile, "export TERMINFO=/usr/share/terminfo\n");
+        fprintf(profile, "export PATH=/bin:/usr/bin:/sbin:/usr/sbin\n");
+        fclose(profile);
+    }
+    
     if (shell_copied) {
-        log_action("Essential libraries and shell(s) copied to sandbox");
+        log_action("Essential libraries, utilities, and terminfo copied to sandbox");
     } else {
         log_action("WARNING: No shell binary found to copy. Please install busybox or bash.");
     }
@@ -384,6 +456,11 @@ static void bind_host_tools(void) {
     (void)system("mount --bind /usr/share/ca-certificates " SANDBOX_ROOT "/usr/share/ca-certificates");
     mkdir_p(SANDBOX_ROOT "/etc/ca-certificates", 0755);
     (void)system("mount --bind /etc/ca-certificates " SANDBOX_ROOT "/etc/ca-certificates");
+    // bind terminfo for clear, reset, etc. to work
+    mkdir_p(SANDBOX_ROOT "/usr/share/terminfo", 0755);
+    (void)system("mount --bind /usr/share/terminfo " SANDBOX_ROOT "/usr/share/terminfo");
+    mkdir_p(SANDBOX_ROOT "/lib/terminfo", 0755);
+    (void)system("mount --bind /lib/terminfo " SANDBOX_ROOT "/lib/terminfo 2>/dev/null || true");
 }
 
 // Pipe file descriptor passed to child for synchronization
