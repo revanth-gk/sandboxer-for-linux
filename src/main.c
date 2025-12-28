@@ -39,6 +39,60 @@ void log_action(const char *action) {
     }
 }
 
+// Check system requirements and print helpful messages
+static int check_system_requirements(void) {
+    int ok = 1;
+    struct stat st;
+    
+    // Check if we're on Linux
+    #ifndef __linux__
+    fprintf(stderr, "Error: This program only works on Linux.\n");
+    return 0;
+    #endif
+    
+    // Check for user namespace support
+    FILE *f = fopen("/proc/sys/kernel/unprivileged_userns_clone", "r");
+    if (f) {
+        int val = 0;
+        if (fscanf(f, "%d", &val) == 1 && val == 0) {
+            fprintf(stderr, "Warning: Unprivileged user namespaces are disabled.\n");
+            fprintf(stderr, "  Run: sudo sysctl -w kernel.unprivileged_userns_clone=1\n");
+            fprintf(stderr, "  Or run this program as root.\n");
+            // Not a fatal error if running as root
+            if (getuid() != 0) {
+                ok = 0;
+            }
+        }
+        fclose(f);
+    }
+    
+    // Check for at least one shell
+    const char *shells[] = {
+        "/bin/busybox", "/bin/bash", "/bin/sh", "/bin/dash", "/bin/zsh",
+        "/usr/bin/bash", "/usr/bin/sh", NULL
+    };
+    int shell_found = 0;
+    for (int i = 0; shells[i]; i++) {
+        if (stat(shells[i], &st) == 0) {
+            shell_found = 1;
+            break;
+        }
+    }
+    if (!shell_found) {
+        fprintf(stderr, "Warning: No shell found (busybox, bash, sh, dash, zsh).\n");
+        fprintf(stderr, "  Install one with: sudo apt install busybox-static\n");
+        fprintf(stderr, "  Or: sudo apt install bash\n");
+    }
+    
+    // Check if /tmp is writable
+    if (access("/tmp", W_OK) != 0) {
+        fprintf(stderr, "Error: /tmp is not writable.\n");
+        ok = 0;
+    }
+    
+    return ok;
+}
+
 static void ensure_dns(void) {
     struct stat st;
     if (stat("/etc/resolv.conf", &st) == -1 || st.st_size == 0) {
@@ -113,23 +167,49 @@ static void bind_essential_libs(void) {
     struct stat st;
     char cmd[MAX_CMD];
     
-    // Create essential directories
-    mkdir_p(SANDBOX_ROOT "/lib", 0755);
-    mkdir_p(SANDBOX_ROOT "/lib64", 0755);
-    mkdir_p(SANDBOX_ROOT "/lib/x86_64-linux-gnu", 0755);
-    mkdir_p(SANDBOX_ROOT "/usr/lib", 0755);
-    mkdir_p(SANDBOX_ROOT "/usr/lib/x86_64-linux-gnu", 0755);
-    mkdir_p(SANDBOX_ROOT "/etc", 0755);
+    log_action("Setting up essential libraries for isolated sandbox...");
+    
+    // Create ALL essential directories
+    const char *essential_dirs[] = {
+        SANDBOX_ROOT "/bin",
+        SANDBOX_ROOT "/sbin",
+        SANDBOX_ROOT "/usr/bin",
+        SANDBOX_ROOT "/usr/sbin",
+        SANDBOX_ROOT "/lib",
+        SANDBOX_ROOT "/lib64",
+        SANDBOX_ROOT "/lib/x86_64-linux-gnu",
+        SANDBOX_ROOT "/usr/lib",
+        SANDBOX_ROOT "/usr/lib/x86_64-linux-gnu",
+        SANDBOX_ROOT "/etc",
+        SANDBOX_ROOT "/tmp",
+        SANDBOX_ROOT "/var",
+        SANDBOX_ROOT "/var/tmp",
+        SANDBOX_ROOT "/proc",
+        SANDBOX_ROOT "/dev",
+        NULL
+    };
+    for (int i = 0; essential_dirs[i]; ++i) {
+        mkdir_p(essential_dirs[i], 0755);
+    }
     
     // Copy essential dynamic linker
     const char *ld_paths[] = {
         "/lib64/ld-linux-x86-64.so.2",
         "/lib/ld-linux.so.2",
         "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "/lib/ld-linux-x86-64.so.2",
         NULL
     };
     for (int i = 0; ld_paths[i]; ++i) {
         if (stat(ld_paths[i], &st) == 0) {
+            // Ensure target directory exists
+            char target_dir[MAX_CMD];
+            snprintf(target_dir, sizeof(target_dir), "%s%s", SANDBOX_ROOT, ld_paths[i]);
+            char *last_slash = strrchr(target_dir, '/');
+            if (last_slash) {
+                *last_slash = '\0';
+                mkdir_p(target_dir, 0755);
+            }
             snprintf(cmd, sizeof(cmd), "cp -L %s %s%s 2>/dev/null || true", 
                     ld_paths[i], SANDBOX_ROOT, ld_paths[i]);
             (void)system(cmd);
@@ -146,9 +226,13 @@ static void bind_essential_libs(void) {
         "/lib/x86_64-linux-gnu/libresolv.so.2",
         "/lib/x86_64-linux-gnu/libnss_files.so.2",
         "/lib/x86_64-linux-gnu/libnss_dns.so.2",
+        "/lib/x86_64-linux-gnu/libtinfo.so.6",
+        "/lib/x86_64-linux-gnu/libncurses.so.6",
         "/lib64/libc.so.6",
         "/lib64/libm.so.6",
         "/lib64/libpthread.so.0",
+        "/lib64/libdl.so.2",
+        "/lib64/libtinfo.so.6",
         NULL
     };
     for (int i = 0; libc_paths[i]; ++i) {
@@ -173,27 +257,75 @@ static void bind_essential_libs(void) {
         (void)system(cmd);
     }
     
-    // Copy basic shell utilities if busybox isn't enough
-    const char *utils[] = {"/bin/sh", "/bin/bash", "/bin/ls", "/bin/cat", "/bin/echo", NULL};
+    // Copy ALL possible shells
+    const char *shells[] = {
+        "/bin/busybox",
+        "/bin/sh",
+        "/bin/bash",
+        "/bin/dash",
+        "/bin/zsh",
+        "/usr/bin/sh",
+        "/usr/bin/bash",
+        "/usr/bin/dash",
+        "/usr/bin/zsh",
+        NULL
+    };
+    
+    int shell_copied = 0;
+    for (int i = 0; shells[i]; ++i) {
+        if (stat(shells[i], &st) == 0) {
+            // Ensure target directory exists
+            char target_dir[MAX_CMD];
+            snprintf(target_dir, sizeof(target_dir), "%s%s", SANDBOX_ROOT, shells[i]);
+            char *last_slash = strrchr(target_dir, '/');
+            if (last_slash) {
+                *last_slash = '\0';
+                mkdir_p(target_dir, 0755);
+            }
+            
+            // Copy the shell
+            snprintf(cmd, sizeof(cmd), "cp -L %s %s%s 2>/dev/null", shells[i], SANDBOX_ROOT, shells[i]);
+            if (system(cmd) == 0) {
+                shell_copied = 1;
+                
+                // Also copy dependencies of this shell using ldd
+                snprintf(cmd, sizeof(cmd), 
+                    "ldd %s 2>/dev/null | grep -o '/[^ ]*' | while read lib; do "
+                    "mkdir -p %s$(dirname \"$lib\") 2>/dev/null; "
+                    "cp -L \"$lib\" %s\"$lib\" 2>/dev/null; done || true", 
+                    shells[i], SANDBOX_ROOT, SANDBOX_ROOT);
+                (void)system(cmd);
+            }
+        }
+    }
+    
+    // Copy basic utilities
+    const char *utils[] = {
+        "/bin/ls", "/bin/cat", "/bin/echo", "/bin/pwd", "/bin/mkdir",
+        "/bin/rm", "/bin/cp", "/bin/mv", "/bin/touch", "/bin/chmod",
+        "/usr/bin/env", "/usr/bin/id", "/usr/bin/whoami",
+        NULL
+    };
     for (int i = 0; utils[i]; ++i) {
         if (stat(utils[i], &st) == 0) {
+            char target_dir[MAX_CMD];
+            snprintf(target_dir, sizeof(target_dir), "%s%s", SANDBOX_ROOT, utils[i]);
+            char *last_slash = strrchr(target_dir, '/');
+            if (last_slash) {
+                *last_slash = '\0';
+                mkdir_p(target_dir, 0755);
+            }
             snprintf(cmd, sizeof(cmd), "cp -L %s %s%s 2>/dev/null || true", 
                     utils[i], SANDBOX_ROOT, utils[i]);
             (void)system(cmd);
         }
     }
     
-    // Copy ldd dependencies of busybox if it exists
-    if (stat("/bin/busybox", &st) == 0) {
-        snprintf(cmd, sizeof(cmd), 
-            "ldd /bin/busybox 2>/dev/null | grep -o '/[^ ]*' | while read lib; do "
-            "mkdir -p %s$(dirname \"$lib\") 2>/dev/null; "
-            "cp -L \"$lib\" %s\"$lib\" 2>/dev/null; done || true", 
-            SANDBOX_ROOT, SANDBOX_ROOT);
-        (void)system(cmd);
+    if (shell_copied) {
+        log_action("Essential libraries and shell(s) copied to sandbox");
+    } else {
+        log_action("WARNING: No shell binary found to copy. Please install busybox or bash.");
     }
-    
-    log_action("Essential libraries bound for isolated sandbox");
 }
 
 static void bind_host_tools(void) {
@@ -333,15 +465,42 @@ int setup_sandbox(void *arg) {
 
     if (should_run_shell) {
         // Ensure resolv.conf inside chroot
+        mkdir("/etc", 0755);
         FILE *rf = fopen("/etc/resolv.conf", "w");
         if (rf) {
             fputs("nameserver 8.8.8.8\nnameserver 8.8.4.4\n", rf);
             fclose(rf);
         }
-        // Run shell
-        execl("/bin/busybox", "busybox", "sh", NULL);
-        execl("/bin/sh", "sh", NULL);
-        perror("execl");
+        
+        // Try multiple shells in order of preference
+        const char *shells[] = {
+            "/bin/busybox",
+            "/bin/bash", 
+            "/bin/sh",
+            "/bin/dash",
+            "/bin/zsh",
+            "/usr/bin/bash",
+            "/usr/bin/sh",
+            NULL
+        };
+        
+        struct stat st;
+        for (int i = 0; shells[i] != NULL; i++) {
+            if (stat(shells[i], &st) == 0 && (st.st_mode & S_IXUSR)) {
+                // Shell exists and is executable
+                if (strstr(shells[i], "busybox")) {
+                    execl(shells[i], "busybox", "sh", NULL);
+                } else {
+                    execl(shells[i], "sh", NULL);
+                }
+                // If execl returns, there was an error
+                perror(shells[i]);
+            }
+        }
+        
+        // If we get here, no shell was found
+        fprintf(stderr, "Error: No shell found in sandbox. Tried: busybox, bash, sh\n");
+        fprintf(stderr, "Make sure busybox or a shell is installed on the host system.\n");
         return 1;
     }
     return 0;
@@ -637,6 +796,13 @@ int main(int argc, char *argv[]) {
     }
     
     int rc = 0;
+    
+    // Check system requirements before proceeding
+    if (!check_system_requirements()) {
+        fprintf(stderr, "System requirements not met. See warnings above.\n");
+        return 1;
+    }
+    
     if (create) {
         rc = create_sandbox(memory, cpu, network, name);
     } else if (enter) {

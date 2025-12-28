@@ -5,10 +5,18 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <libgen.h>
+#include <linux/limits.h>
 
-#define CONFIG_FILE "/home/ubuntu/sandbox/sandboxes.txt"
-#define SANDBOX_BIN "/home/ubuntu/sandbox/bin/sandbox"
-#define LOG_FILE "/home/ubuntu/sandbox/gui.log"
+// Global paths - will be set at runtime based on executable location
+static char g_config_file[PATH_MAX];
+static char g_sandbox_bin[PATH_MAX];
+static char g_log_file[PATH_MAX];
+
+// Macros for compatibility with existing code
+#define CONFIG_FILE g_config_file
+#define SANDBOX_BIN g_sandbox_bin
+#define LOG_FILE g_log_file
 
 typedef struct {
     char name[256];
@@ -550,29 +558,137 @@ static gboolean refresh_usage_cb(gpointer user_data) {
     return TRUE;
 }
 
-// Apply CSS styling for a modern look
+// Initialize paths based on executable location
+static void init_paths(const char *argv0) {
+    char exe_path[PATH_MAX];
+    char *dir;
+    
+    // Try to get the real path of the executable
+    if (realpath(argv0, exe_path) == NULL) {
+        // Fallback: try /proc/self/exe
+        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        if (len != -1) {
+            exe_path[len] = '\0';
+        } else {
+            // Last resort: use current directory
+            getcwd(exe_path, sizeof(exe_path));
+            strncat(exe_path, "/gui", sizeof(exe_path) - strlen(exe_path) - 1);
+        }
+    }
+    
+    // Get directory containing executable
+    dir = dirname(exe_path);
+    
+    // Set paths relative to executable directory
+    // Assuming structure: bin/gui, bin/sandbox, ../sandboxes.txt, ../gui.log
+    snprintf(g_sandbox_bin, sizeof(g_sandbox_bin), "%s/sandbox", dir);
+    
+    // Go up one directory for config and log files
+    char parent_dir[PATH_MAX];
+    snprintf(parent_dir, sizeof(parent_dir), "%s/..", dir);
+    char resolved_parent[PATH_MAX];
+    if (realpath(parent_dir, resolved_parent) != NULL) {
+        snprintf(g_config_file, sizeof(g_config_file), "%s/sandboxes.txt", resolved_parent);
+        snprintf(g_log_file, sizeof(g_log_file), "%s/gui.log", resolved_parent);
+    } else {
+        snprintf(g_config_file, sizeof(g_config_file), "%s/../sandboxes.txt", dir);
+        snprintf(g_log_file, sizeof(g_log_file), "%s/../gui.log", dir);
+    }
+}
+
+// Apply CSS styling - Clean Light Theme
 static void apply_css_styling(void) {
     GtkCssProvider *provider = gtk_css_provider_new();
     const char *css = 
-        "window { background: linear-gradient(180deg, #2b2b2b 0%, #1a1a1a 100%); }"
-        ".header-label { font-size: 18px; font-weight: bold; color: #4fc3f7; }"
-        ".section-frame { background: rgba(255,255,255,0.05); border-radius: 8px; padding: 10px; margin: 5px; }"
-        ".info-label { color: #b0bec5; font-size: 12px; }"
-        ".value-label { color: #ffffff; font-weight: bold; }"
-        ".sandbox-row { padding: 8px; border-radius: 4px; }"
-        ".sandbox-row:selected { background: #1565c0; }"
-        "button { background: linear-gradient(180deg, #424242 0%, #303030 100%); "
-        "         color: white; border-radius: 4px; padding: 8px 16px; border: 1px solid #555; }"
-        "button:hover { background: linear-gradient(180deg, #4fc3f7 0%, #29b6f6 100%); color: black; }"
-        "entry { background: #333; color: white; border-radius: 4px; padding: 6px; border: 1px solid #555; }"
-        "scale trough { background: #333; }"
-        "scale highlight { background: #4fc3f7; }"
-        "progressbar trough { background: #333; border-radius: 4px; }"
-        "progressbar progress { background: linear-gradient(90deg, #4fc3f7, #29b6f6); border-radius: 4px; }"
-        "notebook tab { background: #333; padding: 8px 16px; }"
-        "notebook tab:checked { background: #4fc3f7; color: black; }"
-        ".status-bar { background: #1a1a1a; color: #888; padding: 4px; font-size: 11px; }"
-        "label { color: #e0e0e0; }";
+        /* Main window */
+        "window { background-color: #f5f5f5; }"
+        
+        /* Frames */
+        "frame { border: 1px solid #ddd; }"
+        "frame > label { font-weight: bold; color: #333; }"
+        
+        /* Labels */
+        "label { color: #333; }"
+        
+        /* Buttons */
+        "button { "
+        "    background-image: linear-gradient(to bottom, #ffffff, #f0f0f0); "
+        "    border: 1px solid #ccc; "
+        "    border-radius: 4px; "
+        "    padding: 6px 12px; "
+        "    color: #333; "
+        "}"
+        "button:hover { "
+        "    background-image: linear-gradient(to bottom, #e8f4fc, #d0e8f8); "
+        "    border-color: #2196F3; "
+        "}"
+        "button:active { "
+        "    background-image: linear-gradient(to bottom, #d0e8f8, #b8daf0); "
+        "}"
+        
+        /* Entry fields */
+        "entry { "
+        "    background-color: white; "
+        "    border: 1px solid #ccc; "
+        "    border-radius: 4px; "
+        "    padding: 6px; "
+        "    color: #333; "
+        "}"
+        "entry:focus { border-color: #2196F3; }"
+        
+        /* Progress bars */
+        "progressbar trough { "
+        "    background-color: #e0e0e0; "
+        "    border-radius: 4px; "
+        "}"
+        "progressbar progress { "
+        "    background-color: #2196F3; "
+        "    border-radius: 4px; "
+        "}"
+        
+        /* Scales/Sliders */
+        "scale trough { background-color: #e0e0e0; border-radius: 4px; }"
+        "scale highlight { background-color: #2196F3; border-radius: 4px; }"
+        "scale slider { background-color: #2196F3; border-radius: 50%; }"
+        
+        /* Notebook tabs */
+        "notebook tab { "
+        "    background-color: #e8e8e8; "
+        "    padding: 8px 16px; "
+        "    border: 1px solid #ccc; "
+        "}"
+        "notebook tab:checked { "
+        "    background-color: #ffffff; "
+        "    border-bottom-color: #ffffff; "
+        "}"
+        "notebook header { background-color: #f0f0f0; }"
+        
+        /* List box */
+        "list { background-color: white; }"
+        "list row { padding: 8px; border-bottom: 1px solid #eee; }"
+        "list row:selected { background-color: #e3f2fd; }"
+        
+        /* Scrolled window */
+        "scrolledwindow { background-color: white; border: 1px solid #ddd; }"
+        
+        /* Check buttons */
+        "checkbutton { color: #333; }"
+        
+        /* Separator */
+        "separator { background-color: #ddd; }"
+        
+        /* Status bar */
+        ".status-bar { "
+        "    background-color: #e8e8e8; "
+        "    color: #666; "
+        "    padding: 4px 8px; "
+        "    font-size: 11px; "
+        "    border-top: 1px solid #ccc; "
+        "}"
+        
+        /* Text view (logs) */
+        "textview { background-color: white; color: #333; }"
+        "textview text { background-color: white; }";
     
     gtk_css_provider_load_from_data(provider, css, -1, NULL);
     gtk_style_context_add_provider_for_screen(
@@ -852,6 +968,9 @@ static void on_about_clicked(GtkButton *button, gpointer user_data) {
 int main(int argc, char *argv[]) {
     gtk_init(&argc, &argv);
 
+    // Initialize paths based on executable location
+    init_paths(argv[0]);
+    
     // Apply CSS styling
     apply_css_styling();
     
@@ -877,7 +996,7 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(main_vbox), header_box, FALSE, FALSE, 0);
     
     GtkWidget *title_label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(title_label), "<span size='x-large' weight='bold' color='#4fc3f7'>🔒 Linux Sandbox Manager</span>");
+    gtk_label_set_markup(GTK_LABEL(title_label), "<span size='x-large' weight='bold' color='#1565c0'>🔒 Linux Sandbox Manager</span>");
     gtk_box_pack_start(GTK_BOX(header_box), title_label, FALSE, FALSE, 0);
     
     // Spacer
@@ -1090,7 +1209,7 @@ int main(int argc, char *argv[]) {
     // Help text in detail panel
     GtkWidget *help_label = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(help_label), 
-        "\n<span size='small' color='#888888'>"
+        "\n<span size='small' color='#666666'>"
         "<b>Tips:</b>\n"
         "• Network-enabled sandboxes need root\n"
         "• Isolated sandboxes are more secure\n"
@@ -1118,7 +1237,7 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(log_toolbar), btn_export, FALSE, FALSE, 0);
     
     GtkWidget *log_hint = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(log_hint), "<span color='#888888'>Logs are also written to " LOG_FILE "</span>");
+    gtk_label_set_markup(GTK_LABEL(log_hint), "<span color='#666666'>Logs are also written to " LOG_FILE "</span>");
     gtk_box_pack_end(GTK_BOX(log_toolbar), log_hint, FALSE, FALSE, 0);
     
     GtkWidget *log_scrolled = gtk_scrolled_window_new(NULL, NULL);
