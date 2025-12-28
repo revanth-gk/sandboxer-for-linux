@@ -424,12 +424,12 @@ static void bind_essential_libs(void) {
 
 static void bind_host_tools(void) {
     const char *dirs[] = {"/bin", "/usr/bin", "/usr/sbin", "/lib", "/lib64", "/usr/lib", "/usr/libexec", "/usr/lib/sudo", "/usr/libexec/sudo", NULL};
-    char target[MAX_CMD];
+    char target[256];  // Target path buffer
+    char cmd[512];     // Command buffer
     for (int i = 0; dirs[i]; ++i) {
-        snprintf(target, sizeof(target), SANDBOX_ROOT "%s", dirs[i]);
+        snprintf(target, sizeof(target), SANDBOX_ROOT "%.200s", dirs[i]);
         mkdir_p(target, 0755);
-        char cmd[MAX_CMD];
-        snprintf(cmd, sizeof(cmd), "mount --bind %s %s", dirs[i], target);
+        snprintf(cmd, sizeof(cmd), "mount --bind %.200s %.255s", dirs[i], target);
         (void)system(cmd);
     }
     // bind resolv.conf if present

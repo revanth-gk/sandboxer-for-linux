@@ -590,10 +590,13 @@ static void init_paths(const char *argv0) {
     // Go up one directory for config and log files
     char parent_dir[PATH_MAX];
     snprintf(parent_dir, sizeof(parent_dir), "%s/..", dir);
-    char resolved_parent[PATH_MAX - 32];  // Leave room for filename
-    if (realpath(parent_dir, resolved_parent) != NULL) {
-        snprintf(g_config_file, sizeof(g_config_file), "%s/sandboxes.txt", resolved_parent);
-        snprintf(g_log_file, sizeof(g_log_file), "%s/gui.log", resolved_parent);
+    
+    // Use realpath with NULL to let it allocate the buffer (safer)
+    char *resolved_parent = realpath(parent_dir, NULL);
+    if (resolved_parent != NULL) {
+        snprintf(g_config_file, sizeof(g_config_file), "%.4070s/sandboxes.txt", resolved_parent);
+        snprintf(g_log_file, sizeof(g_log_file), "%.4080s/gui.log", resolved_parent);
+        free(resolved_parent);
     } else {
         snprintf(g_config_file, sizeof(g_config_file), "%s/../sandboxes.txt", dir);
         snprintf(g_log_file, sizeof(g_log_file), "%s/../gui.log", dir);
