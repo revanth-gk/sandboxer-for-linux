@@ -606,9 +606,14 @@ int setup_sandbox(void *arg) {
     }
     
     // Mount sysfs for CPU info (needed by dpkg)
-    if (mount("sysfs", "/sys", "sysfs", 0, NULL) == -1) {
-        // Not fatal, some systems might not support this
-        perror("mount sysfs (non-fatal)");
+    // Only mount if not already available (network mode has /sys bind mounted)
+    struct stat sys_stat;
+    if (stat("/sys/devices", &sys_stat) != 0) {
+        // /sys not available, try to mount sysfs
+        if (mount("sysfs", "/sys", "sysfs", 0, NULL) == -1) {
+            // Not fatal, some systems might not support this
+            perror("mount sysfs (non-fatal)");
+        }
     }
 
     // Mount dev
