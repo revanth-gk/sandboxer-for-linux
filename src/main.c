@@ -403,8 +403,17 @@ static void bind_essential_libs(void) {
         fprintf(profile, "export TERM=${TERM:-xterm}\n");
         fprintf(profile, "export TERMINFO=/usr/share/terminfo\n");
         fprintf(profile, "export PATH=/bin:/usr/bin:/sbin:/usr/sbin\n");
+        fprintf(profile, "export VIMRUNTIME=/usr/share/vim/vim*\n");
         fclose(profile);
     }
+    
+    // Copy vim configuration files - to fix "Failed to source defaults.vim"
+    mkdir_p(SANDBOX_ROOT "/usr/share/vim", 0755);
+    snprintf(cmd, sizeof(cmd), "cp -rL /usr/share/vim/* %s/usr/share/vim/ 2>/dev/null || true", SANDBOX_ROOT);
+    (void)system(cmd);
+    mkdir_p(SANDBOX_ROOT "/etc/vim", 0755);
+    snprintf(cmd, sizeof(cmd), "cp -rL /etc/vim/* %s/etc/vim/ 2>/dev/null || true", SANDBOX_ROOT);
+    (void)system(cmd);
     
     if (shell_copied) {
         log_action("Essential libraries, utilities, and terminfo copied to sandbox");
@@ -491,6 +500,51 @@ static void bind_host_tools(void) {
     (void)system("mount --bind /usr/share/terminfo " SANDBOX_ROOT "/usr/share/terminfo");
     mkdir_p(SANDBOX_ROOT "/lib/terminfo", 0755);
     (void)system("mount --bind /lib/terminfo " SANDBOX_ROOT "/lib/terminfo 2>/dev/null || true");
+    
+    // ===== APT PACKAGE MANAGER SUPPORT =====
+    // Bind apt configuration
+    mkdir_p(SANDBOX_ROOT "/etc/apt", 0755);
+    (void)system("mount --bind /etc/apt " SANDBOX_ROOT "/etc/apt");
+    
+    // Bind apt cache and state directories
+    mkdir_p(SANDBOX_ROOT "/var/lib/apt", 0755);
+    (void)system("mount --bind /var/lib/apt " SANDBOX_ROOT "/var/lib/apt");
+    
+    mkdir_p(SANDBOX_ROOT "/var/cache/apt", 0755);
+    (void)system("mount --bind /var/cache/apt " SANDBOX_ROOT "/var/cache/apt");
+    
+    // Bind dpkg database - CRITICAL for apt to work
+    mkdir_p(SANDBOX_ROOT "/var/lib/dpkg", 0755);
+    (void)system("mount --bind /var/lib/dpkg " SANDBOX_ROOT "/var/lib/dpkg");
+    
+    // Bind apt logs
+    mkdir_p(SANDBOX_ROOT "/var/log/apt", 0755);
+    (void)system("mount --bind /var/log/apt " SANDBOX_ROOT "/var/log/apt 2>/dev/null || true");
+    
+    // Bind /var/log for dpkg logs
+    mkdir_p(SANDBOX_ROOT "/var/log", 0755);
+    ensure_file(SANDBOX_ROOT "/var/log/dpkg.log");
+    (void)system("mount --bind /var/log/dpkg.log " SANDBOX_ROOT "/var/log/dpkg.log 2>/dev/null || true");
+    
+    // Bind /sbin for system utilities
+    mkdir_p(SANDBOX_ROOT "/sbin", 0755);
+    (void)system("mount --bind /sbin " SANDBOX_ROOT "/sbin");
+    
+    // ===== VIM CONFIGURATION =====
+    mkdir_p(SANDBOX_ROOT "/usr/share/vim", 0755);
+    (void)system("mount --bind /usr/share/vim " SANDBOX_ROOT "/usr/share/vim 2>/dev/null || true");
+    mkdir_p(SANDBOX_ROOT "/etc/vim", 0755);
+    (void)system("mount --bind /etc/vim " SANDBOX_ROOT "/etc/vim 2>/dev/null || true");
+    
+    // Bind alternatives for editor command
+    mkdir_p(SANDBOX_ROOT "/etc/alternatives", 0755);
+    (void)system("mount --bind /etc/alternatives " SANDBOX_ROOT "/etc/alternatives 2>/dev/null || true");
+    
+    // Bind locale
+    mkdir_p(SANDBOX_ROOT "/usr/share/locale", 0755);
+    (void)system("mount --bind /usr/share/locale " SANDBOX_ROOT "/usr/share/locale 2>/dev/null || true");
+    
+    log_action("Network sandbox fully configured with apt support");
 }
 
 // Pipe file descriptor passed to child for synchronization
@@ -726,10 +780,19 @@ int create_sandbox(int memory, int cpu, int network, char *name) {
         bind_essential_libs();
     }
 
-    int flags = CLONE_NEWPID | CLONE_NEWNS | SIGCHLD;
+    /*
+     * LINUX NAMESPACES USED:
+     * - CLONE_NEWPID: PID namespace - processes in sandbox have separate PIDs
+     * - CLONE_NEWNS: Mount namespace - filesystem mounts are isolated
+     * - CLONE_NEWUTS: UTS namespace - hostname is isolated
+     * For non-network (isolated) sandboxes, additionally:
+     * - CLONE_NEWUSER: User namespace - UID/GID mapping, allows root in sandbox
+     * - CLONE_NEWNET: Network namespace - completely isolated network stack
+     */
+    int flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
     int use_user_ns = 0;
     if (!network) {
-        flags |= CLONE_NEWUSER | CLONE_NEWNET; // isolate when no network
+        flags |= CLONE_NEWUSER | CLONE_NEWNET; // Full isolation when no network
         use_user_ns = 1;
     }
 
@@ -843,7 +906,8 @@ int enter_sandbox(char *name) {
         bind_essential_libs();
     }
 
-    int flags = CLONE_NEWPID | CLONE_NEWNS | SIGCHLD;
+    // Use same namespaces as create_sandbox
+    int flags = CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | SIGCHLD;
     int use_user_ns = 0;
     if (!config.network) {
         flags |= CLONE_NEWUSER | CLONE_NEWNET;
