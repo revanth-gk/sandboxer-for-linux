@@ -108,6 +108,94 @@ static void install_host_packages(void) {
     }
 }
 
+// Bind essential libraries for minimal sandbox functionality (non-network mode)
+static void bind_essential_libs(void) {
+    struct stat st;
+    char cmd[MAX_CMD];
+    
+    // Create essential directories
+    mkdir_p(SANDBOX_ROOT "/lib", 0755);
+    mkdir_p(SANDBOX_ROOT "/lib64", 0755);
+    mkdir_p(SANDBOX_ROOT "/lib/x86_64-linux-gnu", 0755);
+    mkdir_p(SANDBOX_ROOT "/usr/lib", 0755);
+    mkdir_p(SANDBOX_ROOT "/usr/lib/x86_64-linux-gnu", 0755);
+    mkdir_p(SANDBOX_ROOT "/etc", 0755);
+    
+    // Copy essential dynamic linker
+    const char *ld_paths[] = {
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/ld-linux.so.2",
+        "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        NULL
+    };
+    for (int i = 0; ld_paths[i]; ++i) {
+        if (stat(ld_paths[i], &st) == 0) {
+            snprintf(cmd, sizeof(cmd), "cp -L %s %s%s 2>/dev/null || true", 
+                    ld_paths[i], SANDBOX_ROOT, ld_paths[i]);
+            (void)system(cmd);
+        }
+    }
+    
+    // Copy essential C library files
+    const char *libc_paths[] = {
+        "/lib/x86_64-linux-gnu/libc.so.6",
+        "/lib/x86_64-linux-gnu/libm.so.6",
+        "/lib/x86_64-linux-gnu/libpthread.so.0",
+        "/lib/x86_64-linux-gnu/libdl.so.2",
+        "/lib/x86_64-linux-gnu/librt.so.1",
+        "/lib/x86_64-linux-gnu/libresolv.so.2",
+        "/lib/x86_64-linux-gnu/libnss_files.so.2",
+        "/lib/x86_64-linux-gnu/libnss_dns.so.2",
+        "/lib64/libc.so.6",
+        "/lib64/libm.so.6",
+        "/lib64/libpthread.so.0",
+        NULL
+    };
+    for (int i = 0; libc_paths[i]; ++i) {
+        if (stat(libc_paths[i], &st) == 0) {
+            // Ensure target directory exists
+            char target_dir[MAX_CMD];
+            snprintf(target_dir, sizeof(target_dir), "%s%s", SANDBOX_ROOT, libc_paths[i]);
+            char *last_slash = strrchr(target_dir, '/');
+            if (last_slash) {
+                *last_slash = '\0';
+                mkdir_p(target_dir, 0755);
+            }
+            snprintf(cmd, sizeof(cmd), "cp -L %s %s%s 2>/dev/null || true", 
+                    libc_paths[i], SANDBOX_ROOT, libc_paths[i]);
+            (void)system(cmd);
+        }
+    }
+    
+    // Copy ld.so.cache for library resolution
+    if (stat("/etc/ld.so.cache", &st) == 0) {
+        snprintf(cmd, sizeof(cmd), "cp /etc/ld.so.cache %s/etc/ 2>/dev/null || true", SANDBOX_ROOT);
+        (void)system(cmd);
+    }
+    
+    // Copy basic shell utilities if busybox isn't enough
+    const char *utils[] = {"/bin/sh", "/bin/bash", "/bin/ls", "/bin/cat", "/bin/echo", NULL};
+    for (int i = 0; utils[i]; ++i) {
+        if (stat(utils[i], &st) == 0) {
+            snprintf(cmd, sizeof(cmd), "cp -L %s %s%s 2>/dev/null || true", 
+                    utils[i], SANDBOX_ROOT, utils[i]);
+            (void)system(cmd);
+        }
+    }
+    
+    // Copy ldd dependencies of busybox if it exists
+    if (stat("/bin/busybox", &st) == 0) {
+        snprintf(cmd, sizeof(cmd), 
+            "ldd /bin/busybox 2>/dev/null | grep -o '/[^ ]*' | while read lib; do "
+            "mkdir -p %s$(dirname \"$lib\") 2>/dev/null; "
+            "cp -L \"$lib\" %s\"$lib\" 2>/dev/null; done || true", 
+            SANDBOX_ROOT, SANDBOX_ROOT);
+        (void)system(cmd);
+    }
+    
+    log_action("Essential libraries bound for isolated sandbox");
+}
+
 static void bind_host_tools(void) {
     const char *dirs[] = {"/bin", "/usr/bin", "/usr/sbin", "/lib", "/lib64", "/usr/lib", "/usr/libexec", "/usr/lib/sudo", "/usr/libexec/sudo", NULL};
     char target[MAX_CMD];
@@ -166,9 +254,24 @@ static void bind_host_tools(void) {
     (void)system("mount --bind /etc/ca-certificates " SANDBOX_ROOT "/etc/ca-certificates");
 }
 
+// Pipe file descriptor passed to child for synchronization
+static int sync_pipe_fd = -1;
+
 int setup_sandbox(void *arg) {
     struct SandboxConfig *config = (struct SandboxConfig *)arg;
     int should_run_shell = config ? 1 : 0; // Always run shell when config is provided
+    
+    // Wait for parent to set up uid/gid mappings before proceeding
+    if (sync_pipe_fd >= 0) {
+        char buf;
+        if (read(sync_pipe_fd, &buf, 1) != 1) {
+            perror("sync read");
+            return 1;
+        }
+        close(sync_pipe_fd);
+        sync_pipe_fd = -1;
+    }
+    
     log_action("Setting up sandbox");
 
     // Chroot
@@ -207,19 +310,24 @@ int setup_sandbox(void *arg) {
     mknod("/dev/urandom", S_IFCHR | 0666, makedev(1, 9));
     mknod("/dev/tty", S_IFCHR | 0666, makedev(5, 0));
 
-    // Set resource limits
+    // Set resource limits (only if memory > 0 to avoid killing process immediately)
     if (config) {
-        struct rlimit rl;
-        rl.rlim_cur = config->memory * 1024 * 1024; // MB to bytes
-        rl.rlim_max = RLIM_INFINITY; // Allow increasing soft limit
-        if (setrlimit(RLIMIT_AS, &rl) == -1) {
-            perror("setrlimit RLIMIT_AS");
+        if (config->memory > 0) {
+            struct rlimit rl;
+            rl.rlim_cur = config->memory * 1024 * 1024; // MB to bytes
+            rl.rlim_max = RLIM_INFINITY; // Allow increasing soft limit
+            if (setrlimit(RLIMIT_AS, &rl) == -1) {
+                perror("setrlimit RLIMIT_AS");
+            }
         }
 
-        rl.rlim_cur = config->cpu; // seconds
-        rl.rlim_max = RLIM_INFINITY; // Allow increasing soft limit
-        if (setrlimit(RLIMIT_CPU, &rl) == -1) {
-            perror("setrlimit RLIMIT_CPU");
+        if (config->cpu > 0) {
+            struct rlimit rl;
+            rl.rlim_cur = config->cpu; // seconds
+            rl.rlim_max = RLIM_INFINITY; // Allow increasing soft limit
+            if (setrlimit(RLIMIT_CPU, &rl) == -1) {
+                perror("setrlimit RLIMIT_CPU");
+            }
         }
     }
 
@@ -237,6 +345,35 @@ int setup_sandbox(void *arg) {
         return 1;
     }
     return 0;
+}
+
+static void setup_uid_gid_map(pid_t pid, int use_user_ns) {
+    if (!use_user_ns) return;
+    
+    char path[256];
+    FILE *f;
+    
+    // Must deny setgroups before writing gid_map on modern kernels
+    snprintf(path, sizeof(path), "/proc/%d/setgroups", pid);
+    f = fopen(path, "w");
+    if (f) {
+        fprintf(f, "deny\n");
+        fclose(f);
+    }
+    
+    snprintf(path, sizeof(path), "/proc/%d/uid_map", pid);
+    f = fopen(path, "w");
+    if (f) {
+        fprintf(f, "0 %d 1\n", getuid());
+        fclose(f);
+    }
+    
+    snprintf(path, sizeof(path), "/proc/%d/gid_map", pid);
+    f = fopen(path, "w");
+    if (f) {
+        fprintf(f, "0 %d 1\n", getgid());
+        fclose(f);
+    }
 }
 
 int create_sandbox(int memory, int cpu, int network, char *name) {
@@ -262,7 +399,7 @@ int create_sandbox(int memory, int cpu, int network, char *name) {
 
     // Copy busybox
     char cmd[256];
-    sprintf(cmd, "cp /bin/busybox %s/bin/ 2>/dev/null || true", SANDBOX_ROOT);
+    snprintf(cmd, sizeof(cmd), "cp /bin/busybox %s/bin/ 2>/dev/null || true", SANDBOX_ROOT);
     (void)system(cmd);
 
     if (network) {
@@ -275,36 +412,46 @@ int create_sandbox(int memory, int cpu, int network, char *name) {
         setup_nat_rules();
         install_host_packages();
         bind_host_tools();
+    } else {
+        // For non-network sandboxes, still provide essential libraries
+        bind_essential_libs();
     }
 
     int flags = CLONE_NEWPID | CLONE_NEWNS | SIGCHLD;
+    int use_user_ns = 0;
     if (!network) {
         flags |= CLONE_NEWUSER | CLONE_NEWNET; // isolate when no network
+        use_user_ns = 1;
     }
 
-    struct SandboxConfig config = {memory, cpu, network};
-    pid_t pid = clone(setup_sandbox, child_stack + STACK_SIZE, flags, &config);
-    if (pid == -1) {
-        perror("clone");
+    // Create synchronization pipe
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
         return 1;
     }
 
-    // Map uid/gid for user namespace
-    if (flags & CLONE_NEWUSER) {
-        char path[256];
-        sprintf(path, "/proc/%d/uid_map", pid);
-        FILE *f = fopen(path, "w");
-        if (f) {
-            fprintf(f, "0 %d 1\n", getuid());
-            fclose(f);
-        }
-        sprintf(path, "/proc/%d/gid_map", pid);
-        f = fopen(path, "w");
-        if (f) {
-            fprintf(f, "0 %d 1\n", getgid());
-            fclose(f);
-        }
+    struct SandboxConfig config = {memory, cpu, network};
+    sync_pipe_fd = pipefd[0]; // Child will read from this
+    
+    pid_t pid = clone(setup_sandbox, child_stack + STACK_SIZE, flags, &config);
+    if (pid == -1) {
+        perror("clone");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return 1;
     }
+    
+    close(pipefd[0]); // Parent closes read end
+
+    // Map uid/gid for user namespace (before signaling child)
+    setup_uid_gid_map(pid, use_user_ns);
+    
+    // Signal child to proceed
+    if (write(pipefd[1], "x", 1) != 1) {
+        perror("sync write");
+    }
+    close(pipefd[1]);
 
     if (waitpid(pid, NULL, 0) == -1) {
         perror("waitpid");
@@ -347,6 +494,31 @@ int enter_sandbox(char *name) {
         }
     }
 
+    // Ensure sandbox root directory exists and tmpfs is mounted
+    struct stat st;
+    if (stat(SANDBOX_ROOT, &st) == -1) {
+        mkdir(SANDBOX_ROOT, 0755);
+    }
+    
+    // Check if tmpfs is already mounted, if not mount it
+    if (mount("tmpfs", SANDBOX_ROOT, "tmpfs", 0, NULL) == -1) {
+        if (errno != EBUSY) { // EBUSY means already mounted, which is OK
+            perror("mount tmpfs for enter");
+            // Continue anyway, might work if already mounted
+        }
+    }
+    
+    // Create initial dirs if needed
+    mkdir_p(SANDBOX_ROOT "/bin", 0755);
+    mkdir_p(SANDBOX_ROOT "/usr/bin", 0755);
+    mkdir_p(SANDBOX_ROOT "/lib", 0755);
+    mkdir_p(SANDBOX_ROOT "/lib64", 0755);
+    
+    // Ensure busybox is available
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "cp /bin/busybox %s/bin/ 2>/dev/null || true", SANDBOX_ROOT);
+    (void)system(cmd);
+
     if (config.network) {
         if (getuid() != 0) {
             fprintf(stderr, "Error: networked sandboxes require root (for iptables/sysctl).\n");
@@ -357,36 +529,45 @@ int enter_sandbox(char *name) {
         setup_nat_rules();
         install_host_packages();
         bind_host_tools();
+    } else {
+        // For non-network sandboxes, still provide essential libraries
+        bind_essential_libs();
     }
 
     int flags = CLONE_NEWPID | CLONE_NEWNS | SIGCHLD;
+    int use_user_ns = 0;
     if (!config.network) {
         flags |= CLONE_NEWUSER | CLONE_NEWNET;
+        use_user_ns = 1;
     }
 
-    // If already created, just clone and enter
-    pid_t pid = clone(setup_sandbox, child_stack + STACK_SIZE, flags, &config);
-    if (pid == -1) {
-        perror("clone");
+    // Create synchronization pipe
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
         return 1;
     }
 
-    // Map uid/gid for user namespace
-    if (flags & CLONE_NEWUSER) {
-        char path[256];
-        sprintf(path, "/proc/%d/uid_map", pid);
-        FILE *f = fopen(path, "w");
-        if (f) {
-            fprintf(f, "0 %d 1\n", getuid());
-            fclose(f);
-        }
-        sprintf(path, "/proc/%d/gid_map", pid);
-        f = fopen(path, "w");
-        if (f) {
-            fprintf(f, "0 %d 1\n", getgid());
-            fclose(f);
-        }
+    sync_pipe_fd = pipefd[0]; // Child will read from this
+    
+    pid_t pid = clone(setup_sandbox, child_stack + STACK_SIZE, flags, &config);
+    if (pid == -1) {
+        perror("clone");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return 1;
     }
+    
+    close(pipefd[0]); // Parent closes read end
+
+    // Map uid/gid for user namespace (before signaling child)
+    setup_uid_gid_map(pid, use_user_ns);
+    
+    // Signal child to proceed
+    if (write(pipefd[1], "x", 1) != 1) {
+        perror("sync write");
+    }
+    close(pipefd[1]);
 
     if (waitpid(pid, NULL, 0) == -1) {
         perror("waitpid");
@@ -399,7 +580,7 @@ int enter_sandbox(char *name) {
 int delete_sandbox() {
     log_action("Deleting sandbox");
     char cmd[256];
-    sprintf(cmd, "umount %s 2>/dev/null || true", SANDBOX_ROOT);
+    snprintf(cmd, sizeof(cmd), "umount %s 2>/dev/null || true", SANDBOX_ROOT);
     (void)system(cmd);
     rmdir(SANDBOX_ROOT);
     return 0;
