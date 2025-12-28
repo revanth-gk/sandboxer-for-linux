@@ -1237,7 +1237,9 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(log_toolbar), btn_export, FALSE, FALSE, 0);
     
     GtkWidget *log_hint = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(log_hint), "<span color='#666666'>Logs are also written to " LOG_FILE "</span>");
+    char *log_hint_markup = g_strdup_printf("<span color='#666666'>Logs are also written to %s</span>", LOG_FILE);
+    gtk_label_set_markup(GTK_LABEL(log_hint), log_hint_markup);
+    g_free(log_hint_markup);
     gtk_box_pack_end(GTK_BOX(log_toolbar), log_hint, FALSE, FALSE, 0);
     
     GtkWidget *log_scrolled = gtk_scrolled_window_new(NULL, NULL);
