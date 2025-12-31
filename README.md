@@ -5,6 +5,7 @@ A powerful Linux sandbox program written in C that creates isolated environments
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux-green.svg)
 ![Language](https://img.shields.io/badge/language-C-orange.svg)
+![Version](https://img.shields.io/badge/version-2.0-brightgreen.svg)
 
 ---
 
@@ -14,11 +15,14 @@ A powerful Linux sandbox program written in C that creates isolated environments
 - **Linux Namespaces**: Full isolation using PID, Mount, UTS, User, and Network namespaces
 - **Chroot Environment**: Secure root filesystem isolation
 - **Tmpfs Root**: Ephemeral storage - data is wiped on sandbox exit
-- **Resource Limits**: Configurable memory and CPU time limits
-- **Two Modes**: Isolated (no network) and Connected (with network) modes
+- **Resource Limits**: Configurable memory and CPU cores limits
+- **Two Modes**: Isolated (no network) and Connected (with network + apt) modes
 
 ### User Interface
 - **GTK3 GUI**: Modern graphical interface with system monitoring
+- **Dynamic Resource Controls**: Sliders auto-adjust to your system's CPU cores and RAM
+- **Manual Input**: Spin buttons for precise value entry
+- **Quick Templates**: One-click presets for Dev, Secure, and Test environments
 - **CLI Tool**: Full command-line interface for scripting
 - **Real-time Monitoring**: CPU and memory usage display
 - **Log Management**: Built-in logging with export capability
@@ -148,11 +152,11 @@ sudo ./bin/gui
 ### CLI Mode
 
 ```bash
-# Create a sandbox
-./bin/sandbox -c -s mysandbox -m 256 -t 60
+# Create a sandbox with 2GB memory and 4 CPU cores
+./bin/sandbox -c -s mysandbox -m 2048 -p 4
 
-# Create with network (requires root)
-sudo ./bin/sandbox -c -s mysandbox -m 256 -t 60 -n
+# Create with network (requires root) - enables apt/dpkg
+sudo ./bin/sandbox -c -s mysandbox -m 2048 -p 4 -n
 
 # Enter a sandbox
 ./bin/sandbox -e -s mysandbox
@@ -169,8 +173,8 @@ sudo ./bin/sandbox -c -s mysandbox -m 256 -t 60 -n
 | `-e` | Enter sandbox | - |
 | `-d` | Delete sandbox | - |
 | `-s <name>` | Sandbox name | - |
-| `-m <MB>` | Memory limit in MB | 100 |
-| `-t <sec>` | CPU time limit in seconds | 10 |
+| `-m <MB>` | Memory limit in MB | 1024 |
+| `-p <cores>` | CPU cores to allow | all |
 | `-n` | Enable network access | disabled |
 
 ---

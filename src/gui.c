@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <linux/limits.h>
+#include <sys/statvfs.h>
+#include <dirent.h>
 
 // Global paths - will be set at runtime based on executable location
 static char g_config_file[PATH_MAX];
@@ -18,17 +20,26 @@ static char g_log_file[PATH_MAX];
 #define SANDBOX_BIN g_sandbox_bin
 #define LOG_FILE g_log_file
 
+// System resource info (detected at startup)
+static int g_system_cpu_cores = 4;
+static long g_system_total_memory_mb = 4096;
+static long g_system_available_memory_mb = 2048;
+
 typedef struct {
     char name[256];
-    int memory;
-    int cpu;
+    int memory;      // MB
+    int cpu_cores;   // Number of CPU cores (was: cpu time in seconds)
     int network;
     time_t date;
 } Sandbox;
 
 GtkWidget *entry_name;
 GtkWidget *scale_memory;
+GtkWidget *spin_memory;
+GtkWidget *label_memory_info;
 GtkWidget *scale_cpu;
+GtkWidget *spin_cpu;
+GtkWidget *label_cpu_info;
 GtkWidget *check_network;
 GtkWidget *listbox;
 GtkWidget *log_view;
@@ -79,13 +90,58 @@ static void on_refresh_clicked(GtkButton *button, gpointer user_data);
 static void on_export_logs_clicked(GtkButton *button, gpointer user_data);
 static void on_about_clicked(GtkButton *button, gpointer user_data);
 
+// New function declarations for resource controls
+static void on_memory_slider_changed(GtkRange *range, gpointer user_data);
+static void on_memory_spin_changed(GtkSpinButton *spin, gpointer user_data);
+static void on_cpu_slider_changed(GtkRange *range, gpointer user_data);
+static void on_cpu_spin_changed(GtkSpinButton *spin, gpointer user_data);
+static void update_memory_info_label(void);
+static void update_cpu_info_label(void);
+static void on_template_dev_clicked(GtkButton *button, gpointer user_data);
+static void on_template_secure_clicked(GtkButton *button, gpointer user_data);
+static void on_template_testing_clicked(GtkButton *button, gpointer user_data);
+
+// Detect system resources at startup
+static void detect_system_resources(void) {
+    // Detect CPU cores
+    g_system_cpu_cores = sysconf(_SC_NPROCESSORS_ONLN);
+    if (g_system_cpu_cores <= 0) g_system_cpu_cores = 4;
+    
+    // Detect total and available memory
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && page_size > 0) {
+        g_system_total_memory_mb = (pages * page_size) / (1024 * 1024);
+    }
+    
+    // Get available memory from /proc/meminfo
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (f) {
+        char line[256];
+        long mem_available = 0;
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "MemAvailable:", 13) == 0) {
+                sscanf(line + 13, "%ld", &mem_available);
+                g_system_available_memory_mb = mem_available / 1024;
+                break;
+            }
+        }
+        fclose(f);
+    }
+    
+    // Fallback if MemAvailable not found
+    if (g_system_available_memory_mb <= 0) {
+        g_system_available_memory_mb = g_system_total_memory_mb / 2;
+    }
+}
+
 void load_sandboxes() {
     FILE *f = fopen(CONFIG_FILE, "r");
     if (!f) return;
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         Sandbox *s = malloc(sizeof(Sandbox));
-        sscanf(line, "%s %d %d %d %ld", s->name, &s->memory, &s->cpu, &s->network, &s->date);
+        sscanf(line, "%s %d %d %d %ld", s->name, &s->memory, &s->cpu_cores, &s->network, &s->date);
         sandboxes = g_list_append(sandboxes, s);
     }
     fclose(f);
@@ -96,7 +152,7 @@ void save_sandboxes() {
     if (!f) return;
     for (GList *l = sandboxes; l; l = l->next) {
         Sandbox *s = l->data;
-        fprintf(f, "%s %d %d %d %ld\n", s->name, s->memory, s->cpu, s->network, s->date);
+        fprintf(f, "%s %d %d %d %ld\n", s->name, s->memory, s->cpu_cores, s->network, s->date);
     }
     fclose(f);
 }
@@ -302,19 +358,31 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
     const char *name = gtk_entry_get_text(GTK_ENTRY(entry_name));
-    int memory = (int)gtk_range_get_value(GTK_RANGE(scale_memory));
-    int cpu = (int)gtk_range_get_value(GTK_RANGE(scale_cpu));
+    int memory = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_memory));
+    int cpu_cores = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_cpu));
     int network = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(check_network));
 
     if (!name || !*name) {
-        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Please fill all fields");
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Please enter a sandbox name");
         gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
         return;
     }
 
-    if (memory < 1 || memory > 1024 || cpu < 1 || cpu > 300) {
-        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Invalid slider values (Memory: 1-1024 MB, CPU: 1-300 seconds)");
+    // Validate values against system limits
+    if (memory < 64 || memory > g_system_total_memory_mb) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Memory must be between 64 MB and %ld MB", g_system_total_memory_mb);
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s", msg);
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
+    }
+
+    if (cpu_cores < 1 || cpu_cores > g_system_cpu_cores) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "CPU cores must be between 1 and %d", g_system_cpu_cores);
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s", msg);
         gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
         return;
@@ -331,8 +399,8 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
         }
     }
 
-    // Build argv dynamically to avoid empty arguments
-    char *argv_cmd[10] = {0};
+    // Build argv dynamically - use new -p for CPU cores
+    char *argv_cmd[12] = {0};
     int idx = 0;
     argv_cmd[idx++] = SANDBOX_BIN;
     argv_cmd[idx++] = "-c";
@@ -340,9 +408,9 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     char mem_buf[16];
     snprintf(mem_buf, sizeof(mem_buf), "%d", memory);
     argv_cmd[idx++] = mem_buf;
-    argv_cmd[idx++] = "-t";
+    argv_cmd[idx++] = "-p";
     char cpu_buf[16];
-    snprintf(cpu_buf, sizeof(cpu_buf), "%d", cpu);
+    snprintf(cpu_buf, sizeof(cpu_buf), "%d", cpu_cores);
     argv_cmd[idx++] = cpu_buf;
     if (network) {
         argv_cmd[idx++] = "-n";
@@ -359,13 +427,18 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     Sandbox *s = malloc(sizeof(Sandbox));
     strcpy(s->name, name);
     s->memory = memory;
-    s->cpu = cpu;
+    s->cpu_cores = cpu_cores;
     s->network = network;
     s->date = time(NULL);
     sandboxes = g_list_append(sandboxes, s);
     save_sandboxes();
     update_list();
-    log_gui_event("INFO", name, "Created sandbox");
+    
+    char log_msg[256];
+    snprintf(log_msg, sizeof(log_msg), "Created sandbox (%d MB, %d cores, %s)", 
+             memory, cpu_cores, network ? "network" : "isolated");
+    log_gui_event("INFO", name, log_msg);
+    update_status_bar(log_msg);
 }
 
 void on_child_exited(VteTerminal *terminal, int status, gpointer user_data) {
@@ -424,8 +497,15 @@ void on_clear_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
     gtk_entry_set_text(GTK_ENTRY(entry_name), "");
-    gtk_range_set_value(GTK_RANGE(scale_memory), 100);
-    gtk_range_set_value(GTK_RANGE(scale_cpu), 10);
+    // Set sensible defaults
+    int default_memory = g_system_total_memory_mb / 4;  // 25% of system memory
+    if (default_memory < 256) default_memory = 256;
+    if (default_memory > 4096) default_memory = 4096;
+    int default_cores = g_system_cpu_cores / 2;
+    if (default_cores < 1) default_cores = 1;
+    
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_memory), default_memory);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_cpu), default_cores);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(check_network), FALSE);
 }
 
@@ -849,7 +929,7 @@ static void update_sandbox_details(Sandbox *s) {
     snprintf(buf, sizeof(buf), "Memory Limit: %d MB", s->memory);
     gtk_label_set_text(GTK_LABEL(detail_memory_label), buf);
     
-    snprintf(buf, sizeof(buf), "CPU Time: %d seconds", s->cpu);
+    snprintf(buf, sizeof(buf), "CPU Cores: %d", s->cpu_cores);
     gtk_label_set_text(GTK_LABEL(detail_cpu_label), buf);
     
     gtk_label_set_text(GTK_LABEL(detail_network_label), 
@@ -946,12 +1026,18 @@ static void on_about_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
     
+    char about_text[512];
+    snprintf(about_text, sizeof(about_text),
+             "Linux Sandbox Manager v2.0\n\n"
+             "System: %d CPU cores, %ld MB RAM",
+             g_system_cpu_cores, g_system_total_memory_mb);
+    
     GtkWidget *dialog = gtk_message_dialog_new(
         NULL,
         GTK_DIALOG_MODAL,
         GTK_MESSAGE_INFO,
         GTK_BUTTONS_OK,
-        "Linux Sandbox Manager v1.0"
+        "%s", about_text
     );
     
     gtk_message_dialog_format_secondary_markup(
@@ -959,12 +1045,12 @@ static void on_about_clicked(GtkButton *button, gpointer user_data) {
         "<b>Features:</b>\n"
         "• Create isolated sandbox environments\n"
         "• PID, User, Network namespace isolation\n"
-        "• Memory and CPU resource limits\n"
-        "• Optional network access\n"
+        "• CPU cores and memory resource limits\n"
+        "• Optional network access with package manager\n"
         "• Real-time resource monitoring\n\n"
         "<b>Requirements:</b>\n"
         "• Linux with namespace support\n"
-        "• Root privileges for some operations\n"
+        "• Root privileges for network sandboxes\n"
         "• busybox for minimal shell"
     );
     
@@ -972,9 +1058,130 @@ static void on_about_clicked(GtkButton *button, gpointer user_data) {
     gtk_widget_destroy(dialog);
 }
 
+// ===== Slider/Spin Synchronization Callbacks =====
+
+static gboolean updating_memory = FALSE;
+static gboolean updating_cpu = FALSE;
+
+static void update_memory_info_label(void) {
+    if (!label_memory_info) return;
+    int current = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_memory));
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Available: %ld MB / %ld MB total", 
+             g_system_available_memory_mb, g_system_total_memory_mb);
+    gtk_label_set_text(GTK_LABEL(label_memory_info), buf);
+}
+
+static void update_cpu_info_label(void) {
+    if (!label_cpu_info) return;
+    int current = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_cpu));
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%d / %d cores available", current, g_system_cpu_cores);
+    gtk_label_set_text(GTK_LABEL(label_cpu_info), buf);
+}
+
+static void on_memory_slider_changed(GtkRange *range, gpointer user_data) {
+    (void)user_data;
+    if (updating_memory) return;
+    updating_memory = TRUE;
+    int value = (int)gtk_range_get_value(range);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_memory), value);
+    update_memory_info_label();
+    updating_memory = FALSE;
+}
+
+static void on_memory_spin_changed(GtkSpinButton *spin, gpointer user_data) {
+    (void)user_data;
+    if (updating_memory) return;
+    updating_memory = TRUE;
+    int value = (int)gtk_spin_button_get_value(spin);
+    gtk_range_set_value(GTK_RANGE(scale_memory), value);
+    update_memory_info_label();
+    updating_memory = FALSE;
+}
+
+static void on_cpu_slider_changed(GtkRange *range, gpointer user_data) {
+    (void)user_data;
+    if (updating_cpu) return;
+    updating_cpu = TRUE;
+    int value = (int)gtk_range_get_value(range);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_cpu), value);
+    update_cpu_info_label();
+    updating_cpu = FALSE;
+}
+
+static void on_cpu_spin_changed(GtkSpinButton *spin, gpointer user_data) {
+    (void)user_data;
+    if (updating_cpu) return;
+    updating_cpu = TRUE;
+    int value = (int)gtk_spin_button_get_value(spin);
+    gtk_range_set_value(GTK_RANGE(scale_cpu), value);
+    update_cpu_info_label();
+    updating_cpu = FALSE;
+}
+
+// ===== Quick Template Callbacks =====
+
+static void apply_template(int memory_mb, int cores, gboolean network, const char *name_prefix) {
+    // Generate unique name
+    char name[64];
+    time_t now = time(NULL);
+    snprintf(name, sizeof(name), "%s_%ld", name_prefix, now % 10000);
+    gtk_entry_set_text(GTK_ENTRY(entry_name), name);
+    
+    // Clamp values to system limits
+    if (memory_mb > g_system_total_memory_mb * 80 / 100) {
+        memory_mb = g_system_total_memory_mb * 80 / 100;
+    }
+    if (cores > g_system_cpu_cores) cores = g_system_cpu_cores;
+    
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_memory), memory_mb);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_cpu), cores);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(check_network), network);
+    
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Template applied: %d MB, %d cores, %s", 
+             memory_mb, cores, network ? "network" : "isolated");
+    update_status_bar(msg);
+}
+
+static void on_template_dev_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    // Development: High resources, network enabled
+    int dev_memory = g_system_total_memory_mb / 2;
+    if (dev_memory < 512) dev_memory = 512;
+    if (dev_memory > 8192) dev_memory = 8192;
+    int dev_cores = g_system_cpu_cores * 3 / 4;
+    if (dev_cores < 2) dev_cores = 2;
+    apply_template(dev_memory, dev_cores, TRUE, "dev");
+}
+
+static void on_template_secure_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    // Secure: Minimal resources, no network
+    apply_template(256, 1, FALSE, "secure");
+}
+
+static void on_template_testing_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    // Testing: Medium resources, network enabled
+    int test_memory = g_system_total_memory_mb / 4;
+    if (test_memory < 256) test_memory = 256;
+    if (test_memory > 2048) test_memory = 2048;
+    int test_cores = g_system_cpu_cores / 2;
+    if (test_cores < 1) test_cores = 1;
+    apply_template(test_memory, test_cores, TRUE, "test");
+}
+
 int main(int argc, char *argv[]) {
     gtk_init(&argc, &argv);
 
+    // Detect system resources first
+    detect_system_resources();
+    
     // Initialize paths based on executable location
     init_paths(argv[0]);
     
@@ -1099,33 +1306,97 @@ int main(int argc, char *argv[]) {
     gtk_entry_set_placeholder_text(GTK_ENTRY(entry_name), "Enter sandbox name...");
     gtk_box_pack_start(GTK_BOX(hbox), entry_name, TRUE, TRUE, 0);
 
-    // Memory row
+    // Memory row with slider + spin button
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_box_pack_start(GTK_BOX(create_box), hbox, FALSE, FALSE, 0);
     label = gtk_label_new("Memory (MB):");
     gtk_widget_set_size_request(label, 100, -1);
     gtk_widget_set_halign(label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
-    scale_memory = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, 1024, 1);
-    gtk_range_set_value(GTK_RANGE(scale_memory), 100);
-    gtk_scale_set_draw_value(GTK_SCALE(scale_memory), TRUE);
+    
+    // Dynamic memory slider: 64 MB to 80% of system memory
+    long max_memory = g_system_total_memory_mb * 80 / 100;
+    if (max_memory < 256) max_memory = 256;
+    scale_memory = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 64, max_memory, 64);
+    int default_memory = g_system_total_memory_mb / 4;
+    if (default_memory < 256) default_memory = 256;
+    if (default_memory > 4096) default_memory = 4096;
+    gtk_range_set_value(GTK_RANGE(scale_memory), default_memory);
+    gtk_scale_set_draw_value(GTK_SCALE(scale_memory), FALSE);
+    gtk_widget_set_hexpand(scale_memory, TRUE);
     gtk_box_pack_start(GTK_BOX(hbox), scale_memory, TRUE, TRUE, 0);
+    
+    // Spin button for manual entry
+    spin_memory = gtk_spin_button_new_with_range(64, max_memory, 64);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_memory), default_memory);
+    gtk_widget_set_size_request(spin_memory, 80, -1);
+    gtk_box_pack_start(GTK_BOX(hbox), spin_memory, FALSE, FALSE, 0);
+    
+    // Connect synchronization signals
+    g_signal_connect(scale_memory, "value-changed", G_CALLBACK(on_memory_slider_changed), NULL);
+    g_signal_connect(spin_memory, "value-changed", G_CALLBACK(on_memory_spin_changed), NULL);
+    
+    // Memory info label
+    label_memory_info = gtk_label_new("");
+    gtk_widget_set_halign(label_memory_info, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(create_box), label_memory_info, FALSE, FALSE, 0);
+    update_memory_info_label();
 
-    // CPU row
+    // CPU cores row with slider + spin button
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_box_pack_start(GTK_BOX(create_box), hbox, FALSE, FALSE, 0);
-    label = gtk_label_new("CPU Time (s):");
+    label = gtk_label_new("CPU Cores:");
     gtk_widget_set_size_request(label, 100, -1);
     gtk_widget_set_halign(label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
-    scale_cpu = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, 300, 1);
-    gtk_range_set_value(GTK_RANGE(scale_cpu), 30);
-    gtk_scale_set_draw_value(GTK_SCALE(scale_cpu), TRUE);
+    
+    // Dynamic CPU slider: 1 to system cores
+    scale_cpu = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, g_system_cpu_cores, 1);
+    int default_cores = g_system_cpu_cores / 2;
+    if (default_cores < 1) default_cores = 1;
+    gtk_range_set_value(GTK_RANGE(scale_cpu), default_cores);
+    gtk_scale_set_draw_value(GTK_SCALE(scale_cpu), FALSE);
+    gtk_widget_set_hexpand(scale_cpu, TRUE);
     gtk_box_pack_start(GTK_BOX(hbox), scale_cpu, TRUE, TRUE, 0);
+    
+    // Spin button for manual entry
+    spin_cpu = gtk_spin_button_new_with_range(1, g_system_cpu_cores, 1);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_cpu), default_cores);
+    gtk_widget_set_size_request(spin_cpu, 60, -1);
+    gtk_box_pack_start(GTK_BOX(hbox), spin_cpu, FALSE, FALSE, 0);
+    
+    // Connect synchronization signals
+    g_signal_connect(scale_cpu, "value-changed", G_CALLBACK(on_cpu_slider_changed), NULL);
+    g_signal_connect(spin_cpu, "value-changed", G_CALLBACK(on_cpu_spin_changed), NULL);
+    
+    // CPU info label
+    label_cpu_info = gtk_label_new("");
+    gtk_widget_set_halign(label_cpu_info, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(create_box), label_cpu_info, FALSE, FALSE, 0);
+    update_cpu_info_label();
 
     // Network checkbox
-    check_network = gtk_check_button_new_with_label("🌐 Enable Network Access (requires root)");
+    check_network = gtk_check_button_new_with_label("🌐 Enable Network Access (requires root, enables apt)");
     gtk_box_pack_start(GTK_BOX(create_box), check_network, FALSE, FALSE, 0);
+
+    // Quick template buttons
+    GtkWidget *template_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(create_box), template_box, FALSE, FALSE, 0);
+    
+    GtkWidget *template_label = gtk_label_new("Templates:");
+    gtk_box_pack_start(GTK_BOX(template_box), template_label, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_template_dev = gtk_button_new_with_label("🛠 Dev");
+    g_signal_connect(btn_template_dev, "clicked", G_CALLBACK(on_template_dev_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(template_box), btn_template_dev, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_template_secure = gtk_button_new_with_label("🔒 Secure");
+    g_signal_connect(btn_template_secure, "clicked", G_CALLBACK(on_template_secure_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(template_box), btn_template_secure, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_template_test = gtk_button_new_with_label("🧪 Test");
+    g_signal_connect(btn_template_test, "clicked", G_CALLBACK(on_template_testing_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(template_box), btn_template_test, FALSE, FALSE, 0);
 
     // Create buttons
     hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);

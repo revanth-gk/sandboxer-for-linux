@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <errno.h>
+#include <dirent.h>
 
 #define STACK_SIZE 1024 * 1024
 #define SANDBOX_ROOT "/tmp/sandbox_root"
@@ -26,9 +27,9 @@
 static char child_stack[STACK_SIZE];
 
 struct SandboxConfig {
-    int memory; // MB
-    int cpu;    // sec
-    int network; // 0 disable, 1 enable
+    int memory;     // MB - memory limit
+    int cpu_cores;  // Number of CPU cores to allow (0 = no limit)
+    int network;    // 0 disable, 1 enable
 };
 
 void log_action(const char *action) {
@@ -159,6 +160,88 @@ static void install_host_packages(void) {
         log_action("Package install failed");
     } else {
         log_action("Package install succeeded");
+    }
+}
+
+// Get number of available CPU cores
+static int get_cpu_count(void) {
+    int count = sysconf(_SC_NPROCESSORS_ONLN);
+    return count > 0 ? count : 1;
+}
+
+// Get total system memory in MB
+static long get_total_memory_mb(void) {
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && page_size > 0) {
+        return (pages * page_size) / (1024 * 1024);
+    }
+    return 1024; // Default 1GB if detection fails
+}
+
+// Set CPU affinity to limit cores (call from child process)
+static void apply_cpu_limit(int max_cores) {
+    if (max_cores <= 0) return;
+    
+    int total_cores = get_cpu_count();
+    if (max_cores >= total_cores) return; // No limit needed
+    
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    
+    // Allow cores 0 to max_cores-1
+    for (int i = 0; i < max_cores && i < total_cores; i++) {
+        CPU_SET(i, &cpuset);
+    }
+    
+    if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == -1) {
+        fprintf(stderr, "Warning: Could not set CPU affinity: %s\n", strerror(errno));
+    } else {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "CPU limited to %d core(s)", max_cores);
+        log_action(msg);
+    }
+}
+
+// Apply memory limit using cgroups v2 (if available) or rlimit
+static void apply_memory_limit(int memory_mb) {
+    if (memory_mb <= 0) return;
+    
+    // Try cgroups v2 first
+    char cgroup_path[PATH_MAX];
+    pid_t pid = getpid();
+    snprintf(cgroup_path, sizeof(cgroup_path), "/sys/fs/cgroup/sandbox_%d", pid);
+    
+    if (mkdir(cgroup_path, 0755) == 0 || errno == EEXIST) {
+        char mem_max_path[PATH_MAX];
+        snprintf(mem_max_path, sizeof(mem_max_path), "%s/memory.max", cgroup_path);
+        
+        FILE *f = fopen(mem_max_path, "w");
+        if (f) {
+            fprintf(f, "%ldM\n", (long)memory_mb);
+            fclose(f);
+            
+            // Add current process to cgroup
+            char procs_path[PATH_MAX];
+            snprintf(procs_path, sizeof(procs_path), "%s/cgroup.procs", cgroup_path);
+            FILE *pf = fopen(procs_path, "w");
+            if (pf) {
+                fprintf(pf, "%d\n", pid);
+                fclose(pf);
+                log_action("Memory limit applied via cgroups v2");
+                return;
+            }
+        }
+    }
+    
+    // Fallback to rlimit (less accurate but works everywhere)
+    struct rlimit rl;
+    rl.rlim_cur = (rlim_t)memory_mb * 1024 * 1024;
+    rl.rlim_max = (rlim_t)memory_mb * 1024 * 1024 * 2; // Hard limit 2x soft
+    if (setrlimit(RLIMIT_AS, &rl) == -1) {
+        fprintf(stderr, "Warning: Could not set memory limit: %s\n", strerror(errno));
+    } else {
+        log_action("Memory limit applied via rlimit");
     }
 }
 
@@ -423,28 +506,39 @@ static void bind_essential_libs(void) {
 }
 
 static void bind_host_tools(void) {
-    const char *dirs[] = {"/bin", "/usr/bin", "/usr/sbin", "/lib", "/lib64", "/usr/lib", "/usr/libexec", "/usr/lib/sudo", "/usr/libexec/sudo", NULL};
-    char target[256];  // Target path buffer
-    char cmd[512];     // Command buffer
-    for (int i = 0; dirs[i]; ++i) {
-        snprintf(target, sizeof(target), SANDBOX_ROOT "%.200s", dirs[i]);
-        mkdir_p(target, 0755);
-        snprintf(cmd, sizeof(cmd), "mount --bind %.200s %.255s", dirs[i], target);
-        (void)system(cmd);
-    }
-    // bind resolv.conf if present
     struct stat st;
+    char cmd[MAX_CMD];
+    
+    // ===== CRITICAL: Bind /sys FIRST for CPU info =====
+    // This MUST happen before other mounts to avoid "Error reading the CPU table"
+    mkdir_p(SANDBOX_ROOT "/sys", 0755);
+    if (system("mount --rbind /sys " SANDBOX_ROOT "/sys") != 0) {
+        log_action("Warning: Failed to bind /sys");
+    }
+    
+    // Bind core directories
+    const char *dirs[] = {"/bin", "/usr/bin", "/usr/sbin", "/lib", "/lib64", "/usr/lib", "/usr/libexec", "/usr/lib/sudo", "/usr/libexec/sudo", NULL};
+    char target[PATH_MAX];
+    for (int i = 0; dirs[i]; ++i) {
+        if (stat(dirs[i], &st) == 0) {
+            snprintf(target, sizeof(target), SANDBOX_ROOT "%s", dirs[i]);
+            mkdir_p(target, 0755);
+            snprintf(cmd, sizeof(cmd), "mount --bind %s %s", dirs[i], target);
+            (void)system(cmd);
+        }
+    }
+    
+    // bind resolv.conf if present
     if (stat("/etc/resolv.conf", &st) == 0) {
         mkdir(SANDBOX_ROOT "/etc", 0755);
         ensure_file(SANDBOX_ROOT "/etc/resolv.conf");
-        char cmd[MAX_CMD];
         snprintf(cmd, sizeof(cmd), "mount --bind /etc/resolv.conf %s", SANDBOX_ROOT "/etc/resolv.conf");
         (void)system(cmd);
     }
+    
     // bind ld cache and configs
     if (stat("/etc/ld.so.cache", &st) == 0) {
         ensure_file(SANDBOX_ROOT "/etc/ld.so.cache");
-        char cmd[MAX_CMD];
         snprintf(cmd, sizeof(cmd), "mount --bind /etc/ld.so.cache %s", SANDBOX_ROOT "/etc/ld.so.cache");
         (void)system(cmd);
     }
@@ -452,6 +546,7 @@ static void bind_host_tools(void) {
     ensure_file(SANDBOX_ROOT "/etc/ld.so.conf");
     (void)system("mount --bind /etc/ld.so.conf " SANDBOX_ROOT "/etc/ld.so.conf");
     (void)system("mount --bind /etc/ld.so.conf.d " SANDBOX_ROOT "/etc/ld.so.conf.d");
+    
     // sudo/pam/passwd
     ensure_file(SANDBOX_ROOT "/etc/sudoers");
     (void)system("mount --bind /etc/sudoers " SANDBOX_ROOT "/etc/sudoers");
@@ -471,6 +566,7 @@ static void bind_host_tools(void) {
     (void)system("mount --bind /etc/shadow " SANDBOX_ROOT "/etc/shadow");
     mkdir_p(SANDBOX_ROOT "/var/run/sudo", 0700);
     mkdir_p(SANDBOX_ROOT "/var/lib/sudo", 0700);
+    
     // bind SSL certificates
     mkdir_p(SANDBOX_ROOT "/etc/ssl", 0755);
     (void)system("mount --bind /etc/ssl " SANDBOX_ROOT "/etc/ssl");
@@ -485,13 +581,24 @@ static void bind_host_tools(void) {
     ensure_file(SANDBOX_ROOT "/etc/hosts");
     (void)system("mount --bind /etc/hosts " SANDBOX_ROOT "/etc/hosts");
     
+    // ===== DEVICE NODES FOR APT/DPKG =====
+    // Create /dev with proper permissions
+    mkdir_p(SANDBOX_ROOT "/dev", 0755);
+    
+    // Essential device nodes (create before any bind mounts)
+    (void)system("mknod -m 666 " SANDBOX_ROOT "/dev/null c 1 3 2>/dev/null || true");
+    (void)system("mknod -m 666 " SANDBOX_ROOT "/dev/zero c 1 5 2>/dev/null || true");
+    (void)system("mknod -m 666 " SANDBOX_ROOT "/dev/random c 1 8 2>/dev/null || true");
+    (void)system("mknod -m 666 " SANDBOX_ROOT "/dev/urandom c 1 9 2>/dev/null || true");
+    (void)system("mknod -m 666 " SANDBOX_ROOT "/dev/tty c 5 0 2>/dev/null || true");
+    (void)system("mknod -m 666 " SANDBOX_ROOT "/dev/full c 1 7 2>/dev/null || true");
+    
     // Setup PTY for sudo - CRITICAL for "unable to allocate pty" error
     mkdir_p(SANDBOX_ROOT "/dev/pts", 0755);
-    (void)system("mount -t devpts devpts " SANDBOX_ROOT "/dev/pts -o gid=5,mode=620,ptmxmode=000");
+    (void)system("mount -t devpts devpts " SANDBOX_ROOT "/dev/pts -o gid=5,mode=620,ptmxmode=666 2>/dev/null || true");
     // Create ptmx device
     (void)system("rm -f " SANDBOX_ROOT "/dev/ptmx 2>/dev/null");
-    (void)system("mknod " SANDBOX_ROOT "/dev/ptmx c 5 2 2>/dev/null || true");
-    (void)system("chmod 666 " SANDBOX_ROOT "/dev/ptmx 2>/dev/null || true");
+    (void)system("mknod -m 666 " SANDBOX_ROOT "/dev/ptmx c 5 2 2>/dev/null || true");
     // Alternative: link ptmx to pts/ptmx
     (void)system("ln -sf pts/ptmx " SANDBOX_ROOT "/dev/ptmx 2>/dev/null || true");
     
@@ -508,14 +615,40 @@ static void bind_host_tools(void) {
     
     // Bind apt cache and state directories
     mkdir_p(SANDBOX_ROOT "/var/lib/apt", 0755);
+    mkdir_p(SANDBOX_ROOT "/var/lib/apt/lists", 0755);
+    mkdir_p(SANDBOX_ROOT "/var/lib/apt/lists/partial", 0755);
     (void)system("mount --bind /var/lib/apt " SANDBOX_ROOT "/var/lib/apt");
     
     mkdir_p(SANDBOX_ROOT "/var/cache/apt", 0755);
+    mkdir_p(SANDBOX_ROOT "/var/cache/apt/archives", 0755);
+    mkdir_p(SANDBOX_ROOT "/var/cache/apt/archives/partial", 0755);
     (void)system("mount --bind /var/cache/apt " SANDBOX_ROOT "/var/cache/apt");
     
-    // Bind dpkg database - CRITICAL for apt to work
+    // ===== CRITICAL: DPKG DATABASE =====
+    // Bind dpkg database with all subdirectories
     mkdir_p(SANDBOX_ROOT "/var/lib/dpkg", 0755);
+    mkdir_p(SANDBOX_ROOT "/var/lib/dpkg/info", 0755);
+    mkdir_p(SANDBOX_ROOT "/var/lib/dpkg/triggers", 0755);
+    mkdir_p(SANDBOX_ROOT "/var/lib/dpkg/updates", 0755);
     (void)system("mount --bind /var/lib/dpkg " SANDBOX_ROOT "/var/lib/dpkg");
+    
+    // ===== CRITICAL: DEBCONF for package configuration =====
+    mkdir_p(SANDBOX_ROOT "/var/cache/debconf", 0755);
+    if (stat("/var/cache/debconf", &st) == 0) {
+        (void)system("mount --bind /var/cache/debconf " SANDBOX_ROOT "/var/cache/debconf");
+    }
+    
+    // Bind /usr/share/debconf for debconf templates
+    mkdir_p(SANDBOX_ROOT "/usr/share/debconf", 0755);
+    if (stat("/usr/share/debconf", &st) == 0) {
+        (void)system("mount --bind /usr/share/debconf " SANDBOX_ROOT "/usr/share/debconf");
+    }
+    
+    // Bind /usr/share/dpkg for dpkg scripts
+    mkdir_p(SANDBOX_ROOT "/usr/share/dpkg", 0755);
+    if (stat("/usr/share/dpkg", &st) == 0) {
+        (void)system("mount --bind /usr/share/dpkg " SANDBOX_ROOT "/usr/share/dpkg");
+    }
     
     // Bind apt logs
     mkdir_p(SANDBOX_ROOT "/var/log/apt", 0755);
@@ -544,20 +677,35 @@ static void bind_host_tools(void) {
     mkdir_p(SANDBOX_ROOT "/usr/share/locale", 0755);
     (void)system("mount --bind /usr/share/locale " SANDBOX_ROOT "/usr/share/locale 2>/dev/null || true");
     
-    // ===== SYSTEM DIRECTORIES FOR DPKG/APT =====
-    // Bind /sys for CPU info - FIXES "Error reading the CPU table"
-    // Use --rbind (recursive bind) to ensure all subdirectories like /sys/devices are accessible
-    mkdir_p(SANDBOX_ROOT "/sys", 0755);
-    (void)system("mount --rbind /sys " SANDBOX_ROOT "/sys");
+    // Bind perl lib for dpkg scripts
+    mkdir_p(SANDBOX_ROOT "/usr/share/perl", 0755);
+    if (stat("/usr/share/perl", &st) == 0) {
+        (void)system("mount --bind /usr/share/perl " SANDBOX_ROOT "/usr/share/perl 2>/dev/null || true");
+    }
+    mkdir_p(SANDBOX_ROOT "/usr/share/perl5", 0755);
+    if (stat("/usr/share/perl5", &st) == 0) {
+        (void)system("mount --bind /usr/share/perl5 " SANDBOX_ROOT "/usr/share/perl5 2>/dev/null || true");
+    }
     
-    // Bind /run for various system utilities
+    // Bind /run for various system utilities (lock files, etc.)
     mkdir_p(SANDBOX_ROOT "/run", 0755);
+    mkdir_p(SANDBOX_ROOT "/run/lock", 0755);
     (void)system("mount --bind /run " SANDBOX_ROOT "/run 2>/dev/null || true");
     
-    // Bind /tmp for apt/dpkg temp files
-    mkdir_p(SANDBOX_ROOT "/tmp", 0755);
+    // Bind /tmp for apt/dpkg temp files - make it writable
+    mkdir_p(SANDBOX_ROOT "/tmp", 01777);
+    (void)system("chmod 1777 " SANDBOX_ROOT "/tmp");
     
-    log_action("Network sandbox fully configured with apt support");
+    // Set environment file for DEBIAN_FRONTEND
+    FILE *env_file = fopen(SANDBOX_ROOT "/etc/environment", "w");
+    if (env_file) {
+        fprintf(env_file, "DEBIAN_FRONTEND=noninteractive\n");
+        fprintf(env_file, "DEBCONF_NONINTERACTIVE_SEEN=true\n");
+        fprintf(env_file, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n");
+        fclose(env_file);
+    }
+    
+    log_action("Network sandbox fully configured with enhanced apt support");
 }
 
 // Pipe file descriptor passed to child for synchronization
@@ -651,31 +799,16 @@ int setup_sandbox(void *arg) {
     symlink("/proc/self/fd/1", "/dev/stdout");
     symlink("/proc/self/fd/2", "/dev/stderr");
 
-    // Set resource limits - use soft limits that can be adjusted
-    // Note: These are advisory limits, not hard enforcement
+    // Apply resource limits using our new functions
     if (config) {
-        // Memory limit using RLIMIT_DATA instead of RLIMIT_AS
-        // RLIMIT_AS is too aggressive and includes mmap, shared libs, etc.
-        // RLIMIT_DATA only limits the data segment (heap)
-        if (config->memory > 0 && config->memory < 8192) { // Only apply if < 8GB to be safe
-            struct rlimit rl;
-            // Set a generous soft limit (4x the requested amount for overhead)
-            rl.rlim_cur = (rlim_t)config->memory * 1024 * 1024 * 4;
-            rl.rlim_max = RLIM_INFINITY; // No hard limit
-            if (setrlimit(RLIMIT_DATA, &rl) == -1) {
-                // Not critical if this fails
-                fprintf(stderr, "Warning: Could not set memory limit: %s\\n", strerror(errno));
-            }
+        // Apply CPU cores limit using sched_setaffinity
+        if (config->cpu_cores > 0) {
+            apply_cpu_limit(config->cpu_cores);
         }
-
-        // CPU time limit - when exceeded, process receives SIGXCPU
-        if (config->cpu > 0 && config->cpu < 3600) { // Only apply if < 1 hour
-            struct rlimit rl;
-            rl.rlim_cur = config->cpu; // Soft limit in seconds
-            rl.rlim_max = config->cpu * 2; // Hard limit = 2x soft limit
-            if (setrlimit(RLIMIT_CPU, &rl) == -1) {
-                fprintf(stderr, "Warning: Could not set CPU time limit: %s\\n", strerror(errno));
-            }
+        
+        // Apply memory limit using cgroups or rlimit
+        if (config->memory > 0) {
+            apply_memory_limit(config->memory);
         }
     }
 
@@ -779,7 +912,7 @@ static void setup_uid_gid_map(pid_t pid, int use_user_ns) {
     }
 }
 
-int create_sandbox(int memory, int cpu, int network, char *name) {
+int create_sandbox(int memory, int cpu_cores, int network, char *name) {
     log_action("Creating sandbox");
     int rc = 0;
 
@@ -843,7 +976,7 @@ int create_sandbox(int memory, int cpu, int network, char *name) {
         return 1;
     }
 
-    struct SandboxConfig config = {memory, cpu, network};
+    struct SandboxConfig config = {memory, cpu_cores, network};
     sync_pipe_fd = pipefd[0]; // Child will read from this
     
     pid_t pid = clone(setup_sandbox, child_stack + STACK_SIZE, flags, &config);
@@ -876,7 +1009,7 @@ int create_sandbox(int memory, int cpu, int network, char *name) {
         FILE *config_file = fopen("sandboxes.txt", "a");
         if (config_file) {
             time_t now = time(NULL);
-            fprintf(config_file, "%s %d %d %d %ld\n", name, memory, cpu, network, now);
+            fprintf(config_file, "%s %d %d %d %ld\n", name, memory, cpu_cores, network, now);
             fclose(config_file);
         }
     }
@@ -886,7 +1019,7 @@ int create_sandbox(int memory, int cpu, int network, char *name) {
 int enter_sandbox(char *name) {
     log_action("Entering sandbox");
 
-    struct SandboxConfig config = {100, 10, 0}; // default
+    struct SandboxConfig config = {100, 0, 0}; // default: 100MB, no CPU limit, no network
     if (name) {
         FILE *f = fopen("sandboxes.txt", "r");
         if (f) {
@@ -897,7 +1030,7 @@ int enter_sandbox(char *name) {
                 long t;
                 if (sscanf(line, "%s %d %d %d %ld", n, &m, &c, &net, &t) == 5 && strcmp(n, name) == 0) {
                     config.memory = m;
-                    config.cpu = c;
+                    config.cpu_cores = c;
                     config.network = net;
                     break;
                 }
@@ -1000,14 +1133,14 @@ int delete_sandbox() {
 }
 
 int main(int argc, char *argv[]) {
-    int opt;
-    int memory = 100; // MB
-    int cpu = 10; // sec
+    int memory = 1024; // MB - default 1GB
+    int cpu_cores = 0; // 0 = no limit (use all cores)
     int network = 0; // 0 disable, 1 enable
     int create = 0, enter = 0, delete = 0;
     char *name = NULL;
     
-    while ((opt = getopt(argc, argv, "cedm:t:ns:")) != -1) {
+    int opt;
+    while ((opt = getopt(argc, argv, "cedm:p:ns:")) != -1) {
         switch (opt) {
             case 'c':
                 create = 1;
@@ -1021,8 +1154,8 @@ int main(int argc, char *argv[]) {
             case 'm':
                 memory = atoi(optarg);
                 break;
-            case 't':
-                cpu = atoi(optarg);
+            case 'p':
+                cpu_cores = atoi(optarg);
                 break;
             case 'n':
                 network = 1;
@@ -1031,7 +1164,7 @@ int main(int argc, char *argv[]) {
                 name = optarg;
                 break;
             default:
-                fprintf(stderr, "Usage: %s -c (create) -e (enter) -d (delete) [-m memory(MB)] [-t cpu(sec)] [-n (enable network)] [-s name]\n", argv[0]);
+                fprintf(stderr, "Usage: %s -c (create) -e (enter) -d (delete) [-m memory(MB)] [-p cpu_cores] [-n (enable network)] [-s name]\n", argv[0]);
                 return 1;
         }
     }
@@ -1040,7 +1173,7 @@ int main(int argc, char *argv[]) {
     int action_count = create + enter + delete;
     if (action_count == 0) {
         fprintf(stderr, "Error: Must specify one of -c, -e, or -d\n");
-        fprintf(stderr, "Usage: %s -c (create) -e (enter) -d (delete) [-m memory(MB)] [-t cpu(sec)] [-n (enable network)] [-s name]\n", argv[0]);
+        fprintf(stderr, "Usage: %s -c (create) -e (enter) -d (delete) [-m memory(MB)] [-p cpu_cores] [-n (enable network)] [-s name]\n", argv[0]);
         return 1;
     }
     
@@ -1058,7 +1191,7 @@ int main(int argc, char *argv[]) {
     }
     
     if (create) {
-        rc = create_sandbox(memory, cpu, network, name);
+        rc = create_sandbox(memory, cpu_cores, network, name);
     } else if (enter) {
         rc = enter_sandbox(name);
     } else if (delete) {
