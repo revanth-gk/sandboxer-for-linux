@@ -487,6 +487,10 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
     save_sandboxes();
     update_list();
     
+    // Refresh sandbox combo boxes in File Explorer and Process Manager
+    populate_sandbox_combo(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+    populate_sandbox_combo(GTK_COMBO_BOX_TEXT(process_sandbox_combo));
+    
     char log_msg[256];
     snprintf(log_msg, sizeof(log_msg), "Created sandbox (%d MB, %d cores, %s)", 
              memory, cpu_cores, network ? "network" : "isolated");
@@ -623,6 +627,11 @@ void on_delete_clicked(GtkButton *button, gpointer user_data) {
         }
         save_sandboxes();
         update_list();
+        
+        // Refresh sandbox combo boxes
+        populate_sandbox_combo(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+        populate_sandbox_combo(GTK_COMBO_BOX_TEXT(process_sandbox_combo));
+        
         log_gui_event("INFO", name, "Deleted sandbox");
     }
 }
@@ -1008,6 +1017,26 @@ static void apply_dark_theme(void) {
         "    border-color: #E95420; "
         "}"
         
+        /* === MESSAGE DIALOGS - Fix text visibility === */
+        "messagedialog { "
+        "    background-color: #2d2d2d; "
+        "}"
+        "messagedialog label { "
+        "    color: #ffffff; "
+        "}"
+        "messagedialog .titlebar { "
+        "    background-color: #1a1a1a; "
+        "}"
+        "dialog { "
+        "    background-color: #2d2d2d; "
+        "}"
+        "dialog label { "
+        "    color: #ffffff; "
+        "}"
+        "dialog .titlebar { "
+        "    background-color: #1a1a1a; "
+        "}"
+        
         /* === SEPARATOR === */
         "separator { "
         "    background: linear-gradient(90deg, transparent, rgba(233, 84, 32, 0.3), transparent); "
@@ -1299,6 +1328,20 @@ static void apply_light_theme(void) {
         "}"
         "combobox button:hover { border-color: #E95420; }"
         
+        /* === MESSAGE DIALOGS === */
+        "messagedialog { "
+        "    background-color: #f5f5f5; "
+        "}"
+        "messagedialog label { "
+        "    color: #333333; "
+        "}"
+        "dialog { "
+        "    background-color: #f5f5f5; "
+        "}"
+        "dialog label { "
+        "    color: #333333; "
+        "}"
+        
         /* === SEPARATOR === */
         "separator { "
         "    background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.1), transparent); "
@@ -1583,6 +1626,11 @@ static void on_refresh_clicked(GtkButton *button, gpointer user_data) {
     
     load_sandboxes();
     update_list();
+    
+    // Refresh combo boxes too
+    populate_sandbox_combo(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+    populate_sandbox_combo(GTK_COMBO_BOX_TEXT(process_sandbox_combo));
+    
     update_status_bar("Sandbox list refreshed");
     log_gui_event("INFO", NULL, "Refreshed sandbox list");
 }
