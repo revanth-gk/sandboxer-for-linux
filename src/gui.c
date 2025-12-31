@@ -816,7 +816,6 @@ static void apply_dark_theme(void) {
         "button:hover { "
         "    background: linear-gradient(135deg, #E95420 0%, #FF6F00 100%); "
         "    border-color: #E95420; "
-        "    box-shadow: 0 0 20px rgba(233, 84, 32, 0.4); "
         "    color: #ffffff; "
         "}"
         "button:active { "
@@ -905,12 +904,11 @@ static void apply_dark_theme(void) {
         "    border-radius: 50%; "
         "    min-width: 22px; "
         "    min-height: 22px; "
-        "    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 10px rgba(233, 84, 32, 0.5); "
+        "    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3); "
         "    border: 2px solid #ffffff; "
         "}"
         "scale slider:hover { "
         "    background: linear-gradient(135deg, #FF6F00, #FF8C00); "
-        "    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.6), 0 0 15px rgba(233, 84, 32, 0.7); "
         "}"
         "scale marks { color: #888; }"
         "scale mark { background-color: #666; min-width: 2px; min-height: 8px; }"
@@ -2716,20 +2714,35 @@ int main(int argc, char *argv[]) {
     gtk_widget_set_halign(label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
     
-    // Dynamic memory slider: 64 MB to 80% of system memory
+    // Dynamic memory slider: 128 MB to 80% of system memory (step 128MB for VMWare-style snap)
     long max_memory = g_system_total_memory_mb * 80 / 100;
     if (max_memory < 256) max_memory = 256;
-    scale_memory = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 64, max_memory, 64);
+    // Round max to nearest 128
+    max_memory = (max_memory / 128) * 128;
+    scale_memory = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 128, max_memory, 128);
     int default_memory = g_system_total_memory_mb / 4;
     if (default_memory < 256) default_memory = 256;
     if (default_memory > 4096) default_memory = 4096;
+    default_memory = (default_memory / 128) * 128;  // Round to nearest 128
     gtk_range_set_value(GTK_RANGE(scale_memory), default_memory);
     gtk_scale_set_draw_value(GTK_SCALE(scale_memory), FALSE);
     gtk_widget_set_hexpand(scale_memory, TRUE);
+    
+    // Add tick marks every 512MB for visual reference
+    for (long m = 128; m <= max_memory; m += 512) {
+        char mark_label[16];
+        if (m >= 1024) {
+            snprintf(mark_label, sizeof(mark_label), "%ldG", m / 1024);
+        } else {
+            snprintf(mark_label, sizeof(mark_label), "%ldM", m);
+        }
+        gtk_scale_add_mark(GTK_SCALE(scale_memory), m, GTK_POS_BOTTOM, mark_label);
+    }
+    
     gtk_box_pack_start(GTK_BOX(hbox), scale_memory, TRUE, TRUE, 0);
     
-    // Spin button for manual entry
-    spin_memory = gtk_spin_button_new_with_range(64, max_memory, 64);
+    // Spin button for manual entry (step 128MB to match slider)
+    spin_memory = gtk_spin_button_new_with_range(128, max_memory, 128);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_memory), default_memory);
     gtk_widget_set_size_request(spin_memory, 80, -1);
     gtk_box_pack_start(GTK_BOX(hbox), spin_memory, FALSE, FALSE, 0);
@@ -2759,6 +2772,14 @@ int main(int argc, char *argv[]) {
     gtk_range_set_value(GTK_RANGE(scale_cpu), default_cores);
     gtk_scale_set_draw_value(GTK_SCALE(scale_cpu), FALSE);
     gtk_widget_set_hexpand(scale_cpu, TRUE);
+    
+    // Add tick marks for each core
+    for (int c = 1; c <= g_system_cpu_cores; c++) {
+        char mark_label[8];
+        snprintf(mark_label, sizeof(mark_label), "%d", c);
+        gtk_scale_add_mark(GTK_SCALE(scale_cpu), c, GTK_POS_BOTTOM, mark_label);
+    }
+    
     gtk_box_pack_start(GTK_BOX(hbox), scale_cpu, TRUE, TRUE, 0);
     
     // Spin button for manual entry
