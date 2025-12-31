@@ -59,6 +59,22 @@ GtkWidget *detail_created_label;
 GtkWidget *detail_panel;
 GtkWidget *status_bar;
 
+// File Explorer widgets
+GtkWidget *file_explorer_sandbox_combo;
+GtkWidget *file_path_entry;
+GtkWidget *file_tree_view;
+GtkListStore *file_list_store;
+GtkWidget *file_dir_tree;
+GtkTreeStore *dir_tree_store;
+static char current_file_path[PATH_MAX] = "/";
+
+// Process Manager widgets  
+GtkWidget *process_sandbox_combo;
+GtkWidget *process_tree_view;
+GtkListStore *process_list_store;
+GtkWidget *process_auto_refresh_check;
+guint process_refresh_timer = 0;
+
 typedef struct {
     GtkWindow *window;
     char *sandbox_name;
@@ -70,6 +86,8 @@ typedef struct {
     GtkWidget *mem_bar;
     GtkWidget *cpu_bar;
     GtkWidget *net_label;
+    GtkWidget *status_label;
+    GtkWidget *proc_count_label;
     Sandbox *sandbox;
 } RowWidgets;
 
@@ -100,6 +118,26 @@ static void update_cpu_info_label(void);
 static void on_template_dev_clicked(GtkButton *button, gpointer user_data);
 static void on_template_secure_clicked(GtkButton *button, gpointer user_data);
 static void on_template_testing_clicked(GtkButton *button, gpointer user_data);
+
+// File Explorer function declarations
+static void refresh_file_list(const char *sandbox_name, const char *path);
+static void on_file_go_clicked(GtkButton *button, gpointer user_data);
+static void on_file_up_clicked(GtkButton *button, gpointer user_data);
+static void on_file_refresh_clicked(GtkButton *button, gpointer user_data);
+static void on_file_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data);
+static void on_file_upload_clicked(GtkButton *button, gpointer user_data);
+static void on_file_download_clicked(GtkButton *button, gpointer user_data);
+static void on_file_delete_clicked(GtkButton *button, gpointer user_data);
+static void on_file_new_folder_clicked(GtkButton *button, gpointer user_data);
+static GtkWidget *create_file_explorer_tab(void);
+
+// Process Manager function declarations
+static void refresh_process_list(const char *sandbox_name);
+static void on_process_kill_clicked(GtkButton *button, gpointer user_data);
+static void on_process_refresh_clicked(GtkButton *button, gpointer user_data);
+static gboolean on_process_auto_refresh(gpointer user_data);
+static void on_process_auto_toggle(GtkToggleButton *button, gpointer user_data);
+static GtkWidget *create_process_manager_tab(void);
 
 // Detect system resources at startup
 static void detect_system_resources(void) {
@@ -467,14 +505,34 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
     name[sizeof(name) - 1] = '\0';
 
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(window), "Sandbox Terminal");
-    gtk_window_set_default_size(GTK_WINDOW(window), 800, 600);
+    char title[300];
+    snprintf(title, sizeof(title), "🔒 Sandbox Terminal - %s", name);
+    gtk_window_set_title(GTK_WINDOW(window), title);
+    gtk_window_set_default_size(GTK_WINDOW(window), 900, 650);
 
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_container_add(GTK_CONTAINER(window), box);
 
     // Create terminal and pack it before interacting with it
     GtkWidget *terminal = vte_terminal_new();
+    
+    // Enhanced terminal styling
+    // Set font
+    PangoFontDescription *font_desc = pango_font_description_from_string("JetBrains Mono 12");
+    if (!font_desc) font_desc = pango_font_description_from_string("Monospace 12");
+    vte_terminal_set_font(VTE_TERMINAL(terminal), font_desc);
+    pango_font_description_free(font_desc);
+    
+    // Dracula-inspired color scheme
+    GdkRGBA fg_color = {0.97, 0.97, 0.95, 1.0};  // #f8f8f2
+    GdkRGBA bg_color = {0.16, 0.16, 0.21, 1.0};  // #282a36
+    vte_terminal_set_colors(VTE_TERMINAL(terminal), &fg_color, &bg_color, NULL, 0);
+    
+    // Additional terminal settings
+    vte_terminal_set_scrollback_lines(VTE_TERMINAL(terminal), 10000);
+    vte_terminal_set_cursor_blink_mode(VTE_TERMINAL(terminal), VTE_CURSOR_BLINK_ON);
+    vte_terminal_set_mouse_autohide(VTE_TERMINAL(terminal), TRUE);
+    
     gtk_box_pack_start(GTK_BOX(box), terminal, TRUE, TRUE, 0);
 
     // Prepare context for spawn callbacks
@@ -683,99 +741,300 @@ static void init_paths(const char *argv0) {
     }
 }
 
-// Apply CSS styling - Clean Light Theme
+// Apply CSS styling - Modern Dark Theme with Glassmorphism
 static void apply_css_styling(void) {
     GtkCssProvider *provider = gtk_css_provider_new();
     const char *css = 
-        /* Main window */
-        "window { background-color: #f5f5f5; }"
+        /* === MAIN WINDOW - Deep dark gradient === */
+        "window { "
+        "    background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%); "
+        "}"
         
-        /* Frames */
-        "frame { border: 1px solid #ddd; }"
-        "frame > label { font-weight: bold; color: #333; }"
+        /* === FRAMES - Glassmorphism cards === */
+        "frame { "
+        "    background-color: rgba(255, 255, 255, 0.03); "
+        "    border: 1px solid rgba(255, 255, 255, 0.1); "
+        "    border-radius: 12px; "
+        "}"
+        "frame > label { "
+        "    font-weight: bold; "
+        "    color: #00d9ff; "
+        "    font-size: 13px; "
+        "    text-shadow: 0 0 10px rgba(0, 217, 255, 0.3); "
+        "}"
         
-        /* Labels */
-        "label { color: #333; }"
+        /* === LABELS - Clean white/cyan text === */
+        "label { color: #e0e0e0; }"
+        ".accent { color: #00d9ff; }"
+        ".success { color: #22c55e; }"
+        ".warning { color: #f59e0b; }"
+        ".error { color: #ef4444; }"
         
-        /* Buttons */
+        /* === BUTTONS - Glowing gradient === */
         "button { "
-        "    background-image: linear-gradient(to bottom, #ffffff, #f0f0f0); "
-        "    border: 1px solid #ccc; "
-        "    border-radius: 4px; "
-        "    padding: 6px 12px; "
-        "    color: #333; "
+        "    background: linear-gradient(135deg, #1e3a5f 0%, #2d4a6f 100%); "
+        "    border: 1px solid rgba(0, 217, 255, 0.3); "
+        "    border-radius: 8px; "
+        "    padding: 8px 16px; "
+        "    color: #ffffff; "
+        "    font-weight: 500; "
+        "    transition: all 200ms ease; "
         "}"
         "button:hover { "
-        "    background-image: linear-gradient(to bottom, #e8f4fc, #d0e8f8); "
-        "    border-color: #2196F3; "
+        "    background: linear-gradient(135deg, #00d9ff 0%, #a855f7 100%); "
+        "    border-color: #00d9ff; "
+        "    box-shadow: 0 0 20px rgba(0, 217, 255, 0.4); "
+        "    color: #ffffff; "
         "}"
         "button:active { "
-        "    background-image: linear-gradient(to bottom, #d0e8f8, #b8daf0); "
+        "    background: linear-gradient(135deg, #00b8d9 0%, #9333ea 100%); "
+        "}"
+        "button:disabled { "
+        "    background: #2a2a3a; "
+        "    color: #666; "
+        "    border-color: #444; "
         "}"
         
-        /* Entry fields */
+        /* === PRIMARY ACTION BUTTONS === */
+        ".primary-button { "
+        "    background: linear-gradient(135deg, #00d9ff 0%, #00b8d9 100%); "
+        "    color: #0f0f1a; "
+        "    font-weight: bold; "
+        "}"
+        ".primary-button:hover { "
+        "    background: linear-gradient(135deg, #22e6ff 0%, #00d9ff 100%); "
+        "    box-shadow: 0 0 25px rgba(0, 217, 255, 0.6); "
+        "}"
+        
+        /* === DANGER BUTTONS === */
+        ".danger-button { "
+        "    background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%); "
+        "    border-color: #ef4444; "
+        "}"
+        ".danger-button:hover { "
+        "    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); "
+        "    box-shadow: 0 0 20px rgba(239, 68, 68, 0.5); "
+        "}"
+        
+        /* === ENTRY FIELDS - Dark with glow === */
         "entry { "
-        "    background-color: white; "
-        "    border: 1px solid #ccc; "
-        "    border-radius: 4px; "
-        "    padding: 6px; "
-        "    color: #333; "
+        "    background-color: rgba(15, 15, 26, 0.8); "
+        "    border: 1px solid rgba(255, 255, 255, 0.1); "
+        "    border-radius: 8px; "
+        "    padding: 10px 12px; "
+        "    color: #ffffff; "
+        "    caret-color: #00d9ff; "
         "}"
-        "entry:focus { border-color: #2196F3; }"
+        "entry:focus { "
+        "    border-color: #00d9ff; "
+        "    box-shadow: 0 0 15px rgba(0, 217, 255, 0.3); "
+        "}"
+        "entry:disabled { background-color: #1a1a2e; color: #666; }"
         
-        /* Progress bars */
+        /* === PROGRESS BARS - Gradient fill === */
+        "progressbar { "
+        "    min-height: 12px; "
+        "}"
         "progressbar trough { "
-        "    background-color: #e0e0e0; "
-        "    border-radius: 4px; "
+        "    background-color: rgba(255, 255, 255, 0.05); "
+        "    border-radius: 6px; "
+        "    border: 1px solid rgba(255, 255, 255, 0.1); "
         "}"
         "progressbar progress { "
-        "    background-color: #2196F3; "
-        "    border-radius: 4px; "
+        "    background: linear-gradient(90deg, #00d9ff 0%, #a855f7 100%); "
+        "    border-radius: 6px; "
+        "    box-shadow: 0 0 10px rgba(0, 217, 255, 0.5); "
         "}"
         
-        /* Scales/Sliders */
-        "scale trough { background-color: #e0e0e0; border-radius: 4px; }"
-        "scale highlight { background-color: #2196F3; border-radius: 4px; }"
-        "scale slider { background-color: #2196F3; border-radius: 50%; }"
+        /* === CPU PROGRESS BAR === */
+        ".cpu-bar progress { "
+        "    background: linear-gradient(90deg, #22c55e 0%, #eab308 50%, #ef4444 100%); "
+        "}"
         
-        /* Notebook tabs */
+        /* === MEMORY PROGRESS BAR === */
+        ".mem-bar progress { "
+        "    background: linear-gradient(90deg, #a855f7 0%, #ec4899 100%); "
+        "}"
+        
+        /* === SCALES/SLIDERS === */
+        "scale { min-height: 20px; }"
+        "scale trough { "
+        "    background-color: rgba(255, 255, 255, 0.1); "
+        "    border-radius: 10px; "
+        "    min-height: 8px; "
+        "}"
+        "scale highlight { "
+        "    background: linear-gradient(90deg, #00d9ff, #a855f7); "
+        "    border-radius: 10px; "
+        "}"
+        "scale slider { "
+        "    background: linear-gradient(135deg, #00d9ff, #00b8d9); "
+        "    border-radius: 50%; "
+        "    min-width: 20px; "
+        "    min-height: 20px; "
+        "    box-shadow: 0 0 10px rgba(0, 217, 255, 0.5); "
+        "}"
+        "scale slider:hover { "
+        "    background: linear-gradient(135deg, #22e6ff, #00d9ff); "
+        "    box-shadow: 0 0 15px rgba(0, 217, 255, 0.7); "
+        "}"
+        
+        /* === SPIN BUTTONS === */
+        "spinbutton { "
+        "    background-color: rgba(15, 15, 26, 0.8); "
+        "    border: 1px solid rgba(255, 255, 255, 0.1); "
+        "    border-radius: 8px; "
+        "    color: #ffffff; "
+        "}"
+        "spinbutton:focus { border-color: #00d9ff; }"
+        "spinbutton button { "
+        "    background: rgba(0, 217, 255, 0.2); "
+        "    border: none; "
+        "    color: #00d9ff; "
+        "}"
+        "spinbutton button:hover { background: rgba(0, 217, 255, 0.4); }"
+        
+        /* === NOTEBOOK TABS - Glowing active tab === */
+        "notebook { background-color: transparent; }"
+        "notebook header { "
+        "    background-color: rgba(15, 15, 26, 0.5); "
+        "    border-bottom: 1px solid rgba(255, 255, 255, 0.1); "
+        "}"
         "notebook tab { "
-        "    background-color: #e8e8e8; "
-        "    padding: 8px 16px; "
-        "    border: 1px solid #ccc; "
+        "    background-color: transparent; "
+        "    padding: 10px 20px; "
+        "    border: none; "
+        "    color: #888; "
+        "    font-weight: 500; "
+        "}"
+        "notebook tab:hover { "
+        "    color: #00d9ff; "
+        "    background-color: rgba(0, 217, 255, 0.1); "
         "}"
         "notebook tab:checked { "
-        "    background-color: #ffffff; "
-        "    border-bottom-color: #ffffff; "
+        "    color: #00d9ff; "
+        "    background: linear-gradient(180deg, rgba(0, 217, 255, 0.2), transparent); "
+        "    border-bottom: 2px solid #00d9ff; "
+        "    box-shadow: 0 2px 10px rgba(0, 217, 255, 0.3); "
         "}"
-        "notebook header { background-color: #f0f0f0; }"
+        "notebook stack { background-color: transparent; }"
         
-        /* List box */
-        "list { background-color: white; }"
-        "list row { padding: 8px; border-bottom: 1px solid #eee; }"
-        "list row:selected { background-color: #e3f2fd; }"
+        /* === LIST BOX - Dark rows with hover glow === */
+        "list { "
+        "    background-color: rgba(15, 15, 26, 0.5); "
+        "    border-radius: 8px; "
+        "}"
+        "list row { "
+        "    padding: 12px 16px; "
+        "    border-bottom: 1px solid rgba(255, 255, 255, 0.05); "
+        "    transition: all 150ms ease; "
+        "}"
+        "list row:hover { "
+        "    background-color: rgba(0, 217, 255, 0.1); "
+        "}"
+        "list row:selected { "
+        "    background: linear-gradient(90deg, rgba(0, 217, 255, 0.2), rgba(168, 85, 247, 0.2)); "
+        "    border-left: 3px solid #00d9ff; "
+        "}"
         
-        /* Scrolled window */
-        "scrolledwindow { background-color: white; border: 1px solid #ddd; }"
+        /* === SCROLLED WINDOW === */
+        "scrolledwindow { "
+        "    background-color: rgba(15, 15, 26, 0.3); "
+        "    border: 1px solid rgba(255, 255, 255, 0.05); "
+        "    border-radius: 8px; "
+        "}"
+        "scrollbar { background-color: transparent; }"
+        "scrollbar slider { "
+        "    background-color: rgba(0, 217, 255, 0.3); "
+        "    border-radius: 10px; "
+        "    min-width: 8px; "
+        "}"
+        "scrollbar slider:hover { background-color: rgba(0, 217, 255, 0.5); }"
         
-        /* Check buttons */
-        "checkbutton { color: #333; }"
+        /* === CHECK BUTTONS === */
+        "checkbutton { color: #e0e0e0; }"
+        "checkbutton check { "
+        "    background-color: rgba(15, 15, 26, 0.8); "
+        "    border: 2px solid rgba(255, 255, 255, 0.2); "
+        "    border-radius: 4px; "
+        "    min-width: 20px; "
+        "    min-height: 20px; "
+        "}"
+        "checkbutton check:checked { "
+        "    background: linear-gradient(135deg, #00d9ff, #a855f7); "
+        "    border-color: #00d9ff; "
+        "}"
+        "checkbutton:hover check { border-color: #00d9ff; }"
         
-        /* Separator */
-        "separator { background-color: #ddd; }"
+        /* === SEPARATOR === */
+        "separator { "
+        "    background: linear-gradient(90deg, transparent, rgba(0, 217, 255, 0.3), transparent); "
+        "    min-height: 1px; "
+        "}"
         
-        /* Status bar */
+        /* === STATUS BAR - Subtle gradient === */
         ".status-bar { "
-        "    background-color: #e8e8e8; "
-        "    color: #666; "
-        "    padding: 4px 8px; "
+        "    background: linear-gradient(90deg, rgba(0, 217, 255, 0.1), rgba(168, 85, 247, 0.1)); "
+        "    color: #888; "
+        "    padding: 8px 16px; "
         "    font-size: 11px; "
-        "    border-top: 1px solid #ccc; "
+        "    border-top: 1px solid rgba(255, 255, 255, 0.05); "
         "}"
         
-        /* Text view (logs) */
-        "textview { background-color: white; color: #333; }"
-        "textview text { background-color: white; }";
+        /* === TEXT VIEW (Logs) - Terminal style === */
+        "textview { "
+        "    background-color: #0a0a12; "
+        "    color: #22c55e; "
+        "    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; "
+        "}"
+        "textview text { background-color: #0a0a12; }"
+        
+        /* === TREE VIEW (File Explorer) === */
+        "treeview { "
+        "    background-color: rgba(15, 15, 26, 0.5); "
+        "    color: #e0e0e0; "
+        "}"
+        "treeview:selected { "
+        "    background-color: rgba(0, 217, 255, 0.2); "
+        "}"
+        "treeview header button { "
+        "    background: rgba(0, 217, 255, 0.1); "
+        "    border: none; "
+        "    color: #00d9ff; "
+        "    font-weight: bold; "
+        "}"
+        
+        /* === SANDBOX CARD STYLES === */
+        ".sandbox-card { "
+        "    background: rgba(255, 255, 255, 0.02); "
+        "    border: 1px solid rgba(255, 255, 255, 0.08); "
+        "    border-radius: 12px; "
+        "    padding: 16px; "
+        "}"
+        ".sandbox-card:hover { "
+        "    background: rgba(0, 217, 255, 0.05); "
+        "    border-color: rgba(0, 217, 255, 0.3); "
+        "}"
+        
+        /* === STATUS INDICATORS === */
+        ".status-running { color: #22c55e; text-shadow: 0 0 10px rgba(34, 197, 94, 0.5); }"
+        ".status-idle { color: #666; }"
+        ".status-error { color: #ef4444; text-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }"
+        
+        /* === HEADER TITLE === */
+        ".app-title { "
+        "    font-size: 24px; "
+        "    font-weight: bold; "
+        "    color: #00d9ff; "
+        "    text-shadow: 0 0 20px rgba(0, 217, 255, 0.5); "
+        "}"
+        
+        /* === PANED DIVIDER === */
+        "paned separator { "
+        "    background-color: rgba(0, 217, 255, 0.2); "
+        "    min-width: 4px; "
+        "}"
+        "paned separator:hover { background-color: rgba(0, 217, 255, 0.5); }";
     
     gtk_css_provider_load_from_data(provider, css, -1, NULL);
     gtk_style_context_add_provider_for_screen(
@@ -1176,6 +1435,718 @@ static void on_template_testing_clicked(GtkButton *button, gpointer user_data) {
     apply_template(test_memory, test_cores, TRUE, "test");
 }
 
+// ==================== FILE EXPLORER IMPLEMENTATION ====================
+
+// Get the currently selected sandbox name from combo box
+static const char* get_selected_sandbox_name(GtkComboBoxText *combo) {
+    return gtk_combo_box_text_get_active_text(combo);
+}
+
+// Populate sandbox combo box
+static void populate_sandbox_combo(GtkComboBoxText *combo) {
+    gtk_combo_box_text_remove_all(combo);
+    for (GList *l = sandboxes; l; l = l->next) {
+        Sandbox *s = l->data;
+        gtk_combo_box_text_append_text(combo, s->name);
+    }
+    if (sandboxes) {
+        gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
+    }
+}
+
+// File list columns
+enum {
+    FILE_COL_ICON,
+    FILE_COL_NAME,
+    FILE_COL_SIZE,
+    FILE_COL_TYPE,
+    FILE_COL_MODIFIED,
+    FILE_COL_IS_DIR,
+    FILE_COL_FULL_PATH,
+    FILE_NUM_COLS
+};
+
+// Refresh file list by reading sandbox directory
+static void refresh_file_list(const char *sandbox_name, const char *path) {
+    if (!file_list_store || !sandbox_name || !path) return;
+    
+    gtk_list_store_clear(file_list_store);
+    strncpy(current_file_path, path, PATH_MAX - 1);
+    gtk_entry_set_text(GTK_ENTRY(file_path_entry), path);
+    
+    // Build sandbox path
+    char sandbox_path[PATH_MAX];
+    snprintf(sandbox_path, sizeof(sandbox_path), "/tmp/sandbox_root%s", path);
+    
+    DIR *dir = opendir(sandbox_path);
+    if (!dir) {
+        GtkTreeIter iter;
+        gtk_list_store_append(file_list_store, &iter);
+        gtk_list_store_set(file_list_store, &iter,
+            FILE_COL_ICON, "dialog-error",
+            FILE_COL_NAME, "Cannot open directory",
+            FILE_COL_SIZE, "",
+            FILE_COL_TYPE, "",
+            FILE_COL_MODIFIED, "",
+            FILE_COL_IS_DIR, FALSE,
+            FILE_COL_FULL_PATH, "",
+            -1);
+        return;
+    }
+    
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0) continue;
+        
+        char full_path[PATH_MAX];
+        snprintf(full_path, sizeof(full_path), "%s/%s", sandbox_path, entry->d_name);
+        
+        struct stat st;
+        if (stat(full_path, &st) != 0) continue;
+        
+        gboolean is_dir = S_ISDIR(st.st_mode);
+        const char *icon = is_dir ? "folder" : "text-x-generic";
+        
+        // Format size
+        char size_str[32] = "-";
+        if (!is_dir) {
+            if (st.st_size < 1024) {
+                snprintf(size_str, sizeof(size_str), "%ld B", st.st_size);
+            } else if (st.st_size < 1024 * 1024) {
+                snprintf(size_str, sizeof(size_str), "%.1f KB", st.st_size / 1024.0);
+            } else {
+                snprintf(size_str, sizeof(size_str), "%.1f MB", st.st_size / (1024.0 * 1024.0));
+            }
+        }
+        
+        // Format type
+        const char *type_str = is_dir ? "Folder" : "File";
+        
+        // Format modified time
+        char time_str[64];
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M", localtime(&st.st_mtime));
+        
+        // Build relative path
+        char rel_path[PATH_MAX];
+        if (strcmp(path, "/") == 0) {
+            snprintf(rel_path, sizeof(rel_path), "/%s", entry->d_name);
+        } else {
+            snprintf(rel_path, sizeof(rel_path), "%s/%s", path, entry->d_name);
+        }
+        
+        GtkTreeIter iter;
+        gtk_list_store_append(file_list_store, &iter);
+        gtk_list_store_set(file_list_store, &iter,
+            FILE_COL_ICON, icon,
+            FILE_COL_NAME, entry->d_name,
+            FILE_COL_SIZE, size_str,
+            FILE_COL_TYPE, type_str,
+            FILE_COL_MODIFIED, time_str,
+            FILE_COL_IS_DIR, is_dir,
+            FILE_COL_FULL_PATH, rel_path,
+            -1);
+    }
+    closedir(dir);
+}
+
+static void on_file_go_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+    const char *path = gtk_entry_get_text(GTK_ENTRY(file_path_entry));
+    if (sandbox && path && *path) {
+        refresh_file_list(sandbox, path);
+    }
+}
+
+static void on_file_up_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    if (strcmp(current_file_path, "/") == 0) return;
+    
+    char *last_slash = strrchr(current_file_path, '/');
+    if (last_slash && last_slash != current_file_path) {
+        *last_slash = '\0';
+    } else {
+        strcpy(current_file_path, "/");
+    }
+    
+    const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+    if (sandbox) {
+        refresh_file_list(sandbox, current_file_path);
+    }
+}
+
+static void on_file_refresh_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+    if (sandbox) {
+        refresh_file_list(sandbox, current_file_path);
+    }
+}
+
+static void on_file_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
+    (void)column;
+    (void)user_data;
+    
+    GtkTreeModel *model = gtk_tree_view_get_model(tree_view);
+    GtkTreeIter iter;
+    
+    if (gtk_tree_model_get_iter(model, &iter, path)) {
+        gboolean is_dir;
+        gchar *full_path;
+        gtk_tree_model_get(model, &iter, FILE_COL_IS_DIR, &is_dir, FILE_COL_FULL_PATH, &full_path, -1);
+        
+        if (is_dir && full_path) {
+            const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+            if (sandbox) {
+                refresh_file_list(sandbox, full_path);
+            }
+        }
+        g_free(full_path);
+    }
+}
+
+static void on_file_upload_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Select File to Upload",
+        NULL, GTK_FILE_CHOOSER_ACTION_OPEN,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Upload", GTK_RESPONSE_ACCEPT, NULL);
+    
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        char *basename_str = g_path_get_basename(filename);
+        
+        char dest_path[PATH_MAX];
+        snprintf(dest_path, sizeof(dest_path), "/tmp/sandbox_root%s/%s", current_file_path, basename_str);
+        
+        char cmd[PATH_MAX * 2 + 32];
+        snprintf(cmd, sizeof(cmd), "cp '%s' '%s'", filename, dest_path);
+        
+        if (system(cmd) == 0) {
+            update_status_bar("File uploaded successfully");
+            const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+            if (sandbox) refresh_file_list(sandbox, current_file_path);
+        } else {
+            update_status_bar("Upload failed");
+        }
+        
+        g_free(basename_str);
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+static void on_file_download_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_tree_view));
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    
+    if (!gtk_tree_selection_get_selected(selection, &model, &iter)) {
+        update_status_bar("Please select a file to download");
+        return;
+    }
+    
+    gboolean is_dir;
+    gchar *full_path;
+    gtk_tree_model_get(model, &iter, FILE_COL_IS_DIR, &is_dir, FILE_COL_FULL_PATH, &full_path, -1);
+    
+    if (is_dir) {
+        update_status_bar("Cannot download directories");
+        g_free(full_path);
+        return;
+    }
+    
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Save File As",
+        NULL, GTK_FILE_CHOOSER_ACTION_SAVE,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_Save", GTK_RESPONSE_ACCEPT, NULL);
+    
+    gchar *basename_str = g_path_get_basename(full_path);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), basename_str);
+    
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *dest = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        char src_path[PATH_MAX];
+        snprintf(src_path, sizeof(src_path), "/tmp/sandbox_root%s", full_path);
+        
+        char cmd[PATH_MAX * 2 + 32];
+        snprintf(cmd, sizeof(cmd), "cp '%s' '%s'", src_path, dest);
+        
+        if (system(cmd) == 0) {
+            update_status_bar("File downloaded successfully");
+        } else {
+            update_status_bar("Download failed");
+        }
+        g_free(dest);
+    }
+    
+    g_free(basename_str);
+    g_free(full_path);
+    gtk_widget_destroy(dialog);
+}
+
+static void on_file_delete_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_tree_view));
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    
+    if (!gtk_tree_selection_get_selected(selection, &model, &iter)) {
+        update_status_bar("Please select a file or folder to delete");
+        return;
+    }
+    
+    gchar *name, *full_path;
+    gboolean is_dir;
+    gtk_tree_model_get(model, &iter, FILE_COL_NAME, &name, FILE_COL_FULL_PATH, &full_path, FILE_COL_IS_DIR, &is_dir, -1);
+    
+    // Confirm deletion
+    char msg[512];
+    snprintf(msg, sizeof(msg), "Delete %s '%s'?", is_dir ? "folder" : "file", name);
+    GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO, "%s", msg);
+    
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_YES) {
+        char path_to_delete[PATH_MAX];
+        snprintf(path_to_delete, sizeof(path_to_delete), "/tmp/sandbox_root%s", full_path);
+        
+        char cmd[PATH_MAX + 32];
+        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path_to_delete);
+        
+        if (system(cmd) == 0) {
+            update_status_bar("Deleted successfully");
+            const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+            if (sandbox) refresh_file_list(sandbox, current_file_path);
+        } else {
+            update_status_bar("Delete failed");
+        }
+    }
+    
+    g_free(name);
+    g_free(full_path);
+    gtk_widget_destroy(dialog);
+}
+
+static void on_file_new_folder_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    
+    GtkWidget *dialog = gtk_dialog_new_with_buttons("New Folder", NULL, GTK_DIALOG_MODAL,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Create", GTK_RESPONSE_ACCEPT, NULL);
+    
+    GtkWidget *content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    GtkWidget *entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "Folder name...");
+    gtk_container_add(GTK_CONTAINER(content), entry);
+    gtk_widget_show_all(dialog);
+    
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        const char *name = gtk_entry_get_text(GTK_ENTRY(entry));
+        if (name && *name) {
+            char new_path[PATH_MAX];
+            snprintf(new_path, sizeof(new_path), "/tmp/sandbox_root%s/%s", current_file_path, name);
+            
+            char cmd[PATH_MAX + 32];
+            snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", new_path);
+            
+            if (system(cmd) == 0) {
+                update_status_bar("Folder created");
+                const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+                if (sandbox) refresh_file_list(sandbox, current_file_path);
+            } else {
+                update_status_bar("Failed to create folder");
+            }
+        }
+    }
+    gtk_widget_destroy(dialog);
+}
+
+// Create File Explorer tab
+static GtkWidget *create_file_explorer_tab(void) {
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_start(vbox, 15);
+    gtk_widget_set_margin_end(vbox, 15);
+    gtk_widget_set_margin_top(vbox, 15);
+    gtk_widget_set_margin_bottom(vbox, 15);
+    
+    // Header with sandbox selector
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_box_pack_start(GTK_BOX(vbox), header, FALSE, FALSE, 0);
+    
+    GtkWidget *title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(title), "<span size='large' weight='bold'>📁 File Explorer</span>");
+    gtk_box_pack_start(GTK_BOX(header), title, FALSE, FALSE, 0);
+    
+    GtkWidget *sandbox_label = gtk_label_new("Sandbox:");
+    gtk_box_pack_start(GTK_BOX(header), sandbox_label, FALSE, FALSE, 10);
+    
+    file_explorer_sandbox_combo = gtk_combo_box_text_new();
+    gtk_widget_set_size_request(file_explorer_sandbox_combo, 150, -1);
+    gtk_box_pack_start(GTK_BOX(header), file_explorer_sandbox_combo, FALSE, FALSE, 0);
+    
+    // Path bar
+    GtkWidget *path_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(vbox), path_bar, FALSE, FALSE, 0);
+    
+    GtkWidget *path_label = gtk_label_new("Path:");
+    gtk_box_pack_start(GTK_BOX(path_bar), path_label, FALSE, FALSE, 0);
+    
+    file_path_entry = gtk_entry_new();
+    gtk_entry_set_text(GTK_ENTRY(file_path_entry), "/");
+    gtk_box_pack_start(GTK_BOX(path_bar), file_path_entry, TRUE, TRUE, 0);
+    
+    GtkWidget *btn_go = gtk_button_new_with_label("→ Go");
+    g_signal_connect(btn_go, "clicked", G_CALLBACK(on_file_go_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(path_bar), btn_go, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_up = gtk_button_new_with_label("↑ Up");
+    g_signal_connect(btn_up, "clicked", G_CALLBACK(on_file_up_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(path_bar), btn_up, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_refresh = gtk_button_new_with_label("↻");
+    g_signal_connect(btn_refresh, "clicked", G_CALLBACK(on_file_refresh_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(path_bar), btn_refresh, FALSE, FALSE, 0);
+    
+    // File list
+    GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_box_pack_start(GTK_BOX(vbox), scrolled, TRUE, TRUE, 0);
+    
+    file_list_store = gtk_list_store_new(FILE_NUM_COLS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_STRING);
+    file_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(file_list_store));
+    g_object_unref(file_list_store);
+    
+    // Icon column
+    GtkCellRenderer *icon_renderer = gtk_cell_renderer_pixbuf_new();
+    GtkTreeViewColumn *icon_col = gtk_tree_view_column_new_with_attributes("", icon_renderer, "icon-name", FILE_COL_ICON, NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(file_tree_view), icon_col);
+    
+    // Name column
+    GtkCellRenderer *text_renderer = gtk_cell_renderer_text_new();
+    GtkTreeViewColumn *name_col = gtk_tree_view_column_new_with_attributes("Name", text_renderer, "text", FILE_COL_NAME, NULL);
+    gtk_tree_view_column_set_expand(name_col, TRUE);
+    gtk_tree_view_column_set_min_width(name_col, 200);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(file_tree_view), name_col);
+    
+    // Size column
+    GtkTreeViewColumn *size_col = gtk_tree_view_column_new_with_attributes("Size", text_renderer, "text", FILE_COL_SIZE, NULL);
+    gtk_tree_view_column_set_min_width(size_col, 80);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(file_tree_view), size_col);
+    
+    // Type column
+    GtkTreeViewColumn *type_col = gtk_tree_view_column_new_with_attributes("Type", text_renderer, "text", FILE_COL_TYPE, NULL);
+    gtk_tree_view_column_set_min_width(type_col, 80);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(file_tree_view), type_col);
+    
+    // Modified column
+    GtkTreeViewColumn *mod_col = gtk_tree_view_column_new_with_attributes("Modified", text_renderer, "text", FILE_COL_MODIFIED, NULL);
+    gtk_tree_view_column_set_min_width(mod_col, 140);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(file_tree_view), mod_col);
+    
+    g_signal_connect(file_tree_view, "row-activated", G_CALLBACK(on_file_row_activated), NULL);
+    gtk_container_add(GTK_CONTAINER(scrolled), file_tree_view);
+    
+    // Action buttons
+    GtkWidget *action_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_pack_start(GTK_BOX(vbox), action_bar, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_upload = gtk_button_new_with_label("📤 Upload");
+    g_signal_connect(btn_upload, "clicked", G_CALLBACK(on_file_upload_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(action_bar), btn_upload, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_download = gtk_button_new_with_label("📥 Download");
+    g_signal_connect(btn_download, "clicked", G_CALLBACK(on_file_download_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(action_bar), btn_download, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_new_folder = gtk_button_new_with_label("📁 New Folder");
+    g_signal_connect(btn_new_folder, "clicked", G_CALLBACK(on_file_new_folder_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(action_bar), btn_new_folder, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_delete = gtk_button_new_with_label("🗑 Delete");
+    GtkStyleContext *ctx = gtk_widget_get_style_context(btn_delete);
+    gtk_style_context_add_class(ctx, "danger-button");
+    g_signal_connect(btn_delete, "clicked", G_CALLBACK(on_file_delete_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(action_bar), btn_delete, FALSE, FALSE, 0);
+    
+    return vbox;
+}
+
+// ==================== PROCESS MANAGER IMPLEMENTATION ====================
+
+// Process list columns
+enum {
+    PROC_COL_PID,
+    PROC_COL_NAME,
+    PROC_COL_CPU,
+    PROC_COL_MEM,
+    PROC_COL_STATE,
+    PROC_COL_COMMAND,
+    PROC_NUM_COLS
+};
+
+// Refresh process list
+static void refresh_process_list(const char *sandbox_name) {
+    if (!process_list_store || !sandbox_name) return;
+    
+    gtk_list_store_clear(process_list_store);
+    
+    // Read processes from /proc inside sandbox
+    // For now, we'll read from host /proc (sandbox processes visible)
+    DIR *proc_dir = opendir("/proc");
+    if (!proc_dir) return;
+    
+    struct dirent *entry;
+    while ((entry = readdir(proc_dir)) != NULL) {
+        // Only process numeric directories (PIDs)
+        char *endptr;
+        long pid = strtol(entry->d_name, &endptr, 10);
+        if (*endptr != '\0' || pid <= 0) continue;
+        
+        // Read /proc/[pid]/stat
+        char stat_path[PATH_MAX];
+        snprintf(stat_path, sizeof(stat_path), "/proc/%ld/stat", pid);
+        
+        FILE *f = fopen(stat_path, "r");
+        if (!f) continue;
+        
+        char comm[256] = "";
+        char state = '?';
+        unsigned long utime = 0, stime = 0;
+        long rss = 0;
+        
+        // Parse stat file
+        int scanned = fscanf(f, "%*d (%255[^)]) %c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu %*d %*d %*d %*d %*d %*d %*u %*u %ld",
+            comm, &state, &utime, &stime, &rss);
+        fclose(f);
+        
+        if (scanned < 3) continue;
+        
+        // Skip kernel threads and system processes for cleaner view
+        if (pid < 100) continue;
+        
+        // Format CPU (simplified - just show percentage of total time)
+        double cpu_percent = (utime + stime) / 100.0;
+        char cpu_str[32];
+        snprintf(cpu_str, sizeof(cpu_str), "%.1f%%", cpu_percent > 100 ? 100 : cpu_percent);
+        
+        // Format memory
+        char mem_str[32];
+        long mem_kb = rss * 4; // Assuming 4KB page size
+        if (mem_kb < 1024) {
+            snprintf(mem_str, sizeof(mem_str), "%ld KB", mem_kb);
+        } else {
+            snprintf(mem_str, sizeof(mem_str), "%.1f MB", mem_kb / 1024.0);
+        }
+        
+        // Format state
+        const char *state_str;
+        switch (state) {
+            case 'R': state_str = "Running"; break;
+            case 'S': state_str = "Sleeping"; break;
+            case 'D': state_str = "Disk I/O"; break;
+            case 'Z': state_str = "Zombie"; break;
+            case 'T': state_str = "Stopped"; break;
+            default: state_str = "Unknown"; break;
+        }
+        
+        // Read cmdline
+        char cmdline_path[PATH_MAX];
+        snprintf(cmdline_path, sizeof(cmdline_path), "/proc/%ld/cmdline", pid);
+        char cmdline[256] = "";
+        FILE *cmd_f = fopen(cmdline_path, "r");
+        if (cmd_f) {
+            size_t n = fread(cmdline, 1, sizeof(cmdline) - 1, cmd_f);
+            if (n > 0) {
+                // Replace null bytes with spaces
+                for (size_t i = 0; i < n; i++) {
+                    if (cmdline[i] == '\0') cmdline[i] = ' ';
+                }
+                cmdline[n] = '\0';
+            }
+            fclose(cmd_f);
+        }
+        if (cmdline[0] == '\0') {
+            snprintf(cmdline, sizeof(cmdline), "[%s]", comm);
+        }
+        
+        GtkTreeIter iter;
+        gtk_list_store_append(process_list_store, &iter);
+        gtk_list_store_set(process_list_store, &iter,
+            PROC_COL_PID, (int)pid,
+            PROC_COL_NAME, comm,
+            PROC_COL_CPU, cpu_str,
+            PROC_COL_MEM, mem_str,
+            PROC_COL_STATE, state_str,
+            PROC_COL_COMMAND, cmdline,
+            -1);
+    }
+    closedir(proc_dir);
+}
+
+static void on_process_kill_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(process_tree_view));
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    
+    if (!gtk_tree_selection_get_selected(selection, &model, &iter)) {
+        update_status_bar("Please select a process to kill");
+        return;
+    }
+    
+    int pid;
+    gchar *name;
+    gtk_tree_model_get(model, &iter, PROC_COL_PID, &pid, PROC_COL_NAME, &name, -1);
+    
+    char msg[256];
+    snprintf(msg, sizeof(msg), "Kill process %d (%s)?", pid, name);
+    GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO, "%s", msg);
+    
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_YES) {
+        char cmd[64];
+        snprintf(cmd, sizeof(cmd), "kill -9 %d 2>/dev/null", pid);
+        system(cmd);
+        update_status_bar("Process killed");
+        
+        const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(process_sandbox_combo));
+        if (sandbox) refresh_process_list(sandbox);
+    }
+    
+    g_free(name);
+    gtk_widget_destroy(dialog);
+}
+
+static void on_process_refresh_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(process_sandbox_combo));
+    if (sandbox) {
+        refresh_process_list(sandbox);
+        update_status_bar("Process list refreshed");
+    }
+}
+
+static gboolean on_process_auto_refresh(gpointer user_data) {
+    (void)user_data;
+    const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(process_sandbox_combo));
+    if (sandbox) refresh_process_list(sandbox);
+    return TRUE; // Continue timer
+}
+
+static void on_process_auto_toggle(GtkToggleButton *button, gpointer user_data) {
+    (void)user_data;
+    if (gtk_toggle_button_get_active(button)) {
+        if (process_refresh_timer == 0) {
+            process_refresh_timer = g_timeout_add(2000, on_process_auto_refresh, NULL);
+            update_status_bar("Auto-refresh enabled (2s)");
+        }
+    } else {
+        if (process_refresh_timer > 0) {
+            g_source_remove(process_refresh_timer);
+            process_refresh_timer = 0;
+            update_status_bar("Auto-refresh disabled");
+        }
+    }
+}
+
+// Create Process Manager tab
+static GtkWidget *create_process_manager_tab(void) {
+    GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_start(vbox, 15);
+    gtk_widget_set_margin_end(vbox, 15);
+    gtk_widget_set_margin_top(vbox, 15);
+    gtk_widget_set_margin_bottom(vbox, 15);
+    
+    // Header
+    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_box_pack_start(GTK_BOX(vbox), header, FALSE, FALSE, 0);
+    
+    GtkWidget *title = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(title), "<span size='large' weight='bold'>⚡ Process Manager</span>");
+    gtk_box_pack_start(GTK_BOX(header), title, FALSE, FALSE, 0);
+    
+    GtkWidget *sandbox_label = gtk_label_new("Sandbox:");
+    gtk_box_pack_start(GTK_BOX(header), sandbox_label, FALSE, FALSE, 10);
+    
+    process_sandbox_combo = gtk_combo_box_text_new();
+    gtk_widget_set_size_request(process_sandbox_combo, 150, -1);
+    gtk_box_pack_start(GTK_BOX(header), process_sandbox_combo, FALSE, FALSE, 0);
+    
+    // Process list
+    GtkWidget *scrolled = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_box_pack_start(GTK_BOX(vbox), scrolled, TRUE, TRUE, 0);
+    
+    process_list_store = gtk_list_store_new(PROC_NUM_COLS, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    process_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(process_list_store));
+    g_object_unref(process_list_store);
+    
+    GtkCellRenderer *text_renderer = gtk_cell_renderer_text_new();
+    
+    // PID column
+    GtkTreeViewColumn *pid_col = gtk_tree_view_column_new_with_attributes("PID", text_renderer, "text", PROC_COL_PID, NULL);
+    gtk_tree_view_column_set_min_width(pid_col, 60);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(process_tree_view), pid_col);
+    
+    // Name column
+    GtkTreeViewColumn *name_col = gtk_tree_view_column_new_with_attributes("Name", text_renderer, "text", PROC_COL_NAME, NULL);
+    gtk_tree_view_column_set_min_width(name_col, 120);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(process_tree_view), name_col);
+    
+    // CPU column
+    GtkTreeViewColumn *cpu_col = gtk_tree_view_column_new_with_attributes("CPU", text_renderer, "text", PROC_COL_CPU, NULL);
+    gtk_tree_view_column_set_min_width(cpu_col, 70);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(process_tree_view), cpu_col);
+    
+    // Memory column
+    GtkTreeViewColumn *mem_col = gtk_tree_view_column_new_with_attributes("Memory", text_renderer, "text", PROC_COL_MEM, NULL);
+    gtk_tree_view_column_set_min_width(mem_col, 80);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(process_tree_view), mem_col);
+    
+    // State column
+    GtkTreeViewColumn *state_col = gtk_tree_view_column_new_with_attributes("State", text_renderer, "text", PROC_COL_STATE, NULL);
+    gtk_tree_view_column_set_min_width(state_col, 80);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(process_tree_view), state_col);
+    
+    // Command column
+    GtkTreeViewColumn *cmd_col = gtk_tree_view_column_new_with_attributes("Command", text_renderer, "text", PROC_COL_COMMAND, NULL);
+    gtk_tree_view_column_set_expand(cmd_col, TRUE);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(process_tree_view), cmd_col);
+    
+    gtk_container_add(GTK_CONTAINER(scrolled), process_tree_view);
+    
+    // Action buttons
+    GtkWidget *action_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_pack_start(GTK_BOX(vbox), action_bar, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_kill = gtk_button_new_with_label("🔪 Kill Process");
+    GtkStyleContext *ctx = gtk_widget_get_style_context(btn_kill);
+    gtk_style_context_add_class(ctx, "danger-button");
+    g_signal_connect(btn_kill, "clicked", G_CALLBACK(on_process_kill_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(action_bar), btn_kill, FALSE, FALSE, 0);
+    
+    GtkWidget *btn_refresh = gtk_button_new_with_label("↻ Refresh");
+    g_signal_connect(btn_refresh, "clicked", G_CALLBACK(on_process_refresh_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(action_bar), btn_refresh, FALSE, FALSE, 0);
+    
+    process_auto_refresh_check = gtk_check_button_new_with_label("Auto-refresh (2s)");
+    g_signal_connect(process_auto_refresh_check, "toggled", G_CALLBACK(on_process_auto_toggle), NULL);
+    gtk_box_pack_start(GTK_BOX(action_bar), process_auto_refresh_check, FALSE, FALSE, 10);
+    
+    return vbox;
+}
+
 int main(int argc, char *argv[]) {
     gtk_init(&argc, &argv);
 
@@ -1210,7 +2181,9 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(main_vbox), header_box, FALSE, FALSE, 0);
     
     GtkWidget *title_label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(title_label), "<span size='x-large' weight='bold' color='#1565c0'>🔒 Linux Sandbox Manager</span>");
+    gtk_label_set_markup(GTK_LABEL(title_label), "<span size='x-large' weight='bold' color='#00d9ff'>🔒 Linux Sandbox Manager</span>");
+    GtkStyleContext *title_ctx = gtk_widget_get_style_context(title_label);
+    gtk_style_context_add_class(title_ctx, "app-title");
     gtk_box_pack_start(GTK_BOX(header_box), title_label, FALSE, FALSE, 0);
     
     // Spacer
@@ -1531,6 +2504,14 @@ int main(int argc, char *argv[]) {
 
     gtk_notebook_append_page(GTK_NOTEBOOK(notebook), logs_box, gtk_label_new("📋 Logs"));
 
+    // ===== FILE EXPLORER TAB =====
+    GtkWidget *file_explorer = create_file_explorer_tab();
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), file_explorer, gtk_label_new("📁 Files"));
+    
+    // ===== PROCESS MANAGER TAB =====
+    GtkWidget *process_manager = create_process_manager_tab();
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), process_manager, gtk_label_new("⚡ Processes"));
+
     // ===== STATUS BAR =====
     status_bar = gtk_label_new("Ready");
     gtk_widget_set_halign(status_bar, GTK_ALIGN_START);
@@ -1547,6 +2528,10 @@ int main(int argc, char *argv[]) {
     update_log_view();
     update_sandbox_details(NULL);
     refresh_system_info_cb(NULL); // Initial update
+    
+    // Populate sandbox combos for File Explorer and Process Manager
+    populate_sandbox_combo(GTK_COMBO_BOX_TEXT(file_explorer_sandbox_combo));
+    populate_sandbox_combo(GTK_COMBO_BOX_TEXT(process_sandbox_combo));
     
     // Set up timers
     g_timeout_add_seconds(2, refresh_usage_cb, NULL);
