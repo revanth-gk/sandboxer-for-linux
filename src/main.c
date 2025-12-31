@@ -546,8 +546,9 @@ static void bind_host_tools(void) {
     
     // ===== SYSTEM DIRECTORIES FOR DPKG/APT =====
     // Bind /sys for CPU info - FIXES "Error reading the CPU table"
+    // Use --rbind (recursive bind) to ensure all subdirectories like /sys/devices are accessible
     mkdir_p(SANDBOX_ROOT "/sys", 0755);
-    (void)system("mount --bind /sys " SANDBOX_ROOT "/sys");
+    (void)system("mount --rbind /sys " SANDBOX_ROOT "/sys");
     
     // Bind /run for various system utilities
     mkdir_p(SANDBOX_ROOT "/run", 0755);
