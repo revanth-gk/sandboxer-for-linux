@@ -606,14 +606,16 @@ int setup_sandbox(void *arg) {
     }
     
     // Mount sysfs for CPU info (needed by dpkg)
-    // Only mount if not already available (network mode has /sys bind mounted)
-    struct stat sys_stat;
-    if (stat("/sys/devices", &sys_stat) != 0) {
-        // /sys not available, try to mount sysfs
-        if (mount("sysfs", "/sys", "sysfs", 0, NULL) == -1) {
-            // Not fatal, some systems might not support this
-            perror("mount sysfs (non-fatal)");
+    // Network mode has /sys bind mounted, but for non-network we need to mount it
+    // Always try to mount sysfs - if already mounted from network mode, mount will fail gracefully
+    if (mount("sysfs", "/sys", "sysfs", 0, NULL) == -1) {
+        // Check if /sys is already available (from bind mount in network mode)
+        struct stat sys_stat;
+        if (stat("/sys/devices", &sys_stat) != 0) {
+            // /sys still not available after mount failure - not critical but log it
+            fprintf(stderr, "Warning: Could not mount /sys filesystem. Some tools (apt, dpkg) may report errors.\\n");
         }
+        // If stat succeeds, /sys is available (bind mounted), which is fine
     }
 
     // Mount dev
@@ -643,23 +645,30 @@ int setup_sandbox(void *arg) {
     symlink("/proc/self/fd/1", "/dev/stdout");
     symlink("/proc/self/fd/2", "/dev/stderr");
 
-    // Set resource limits (only if memory > 0 to avoid killing process immediately)
+    // Set resource limits - use soft limits that can be adjusted
+    // Note: These are advisory limits, not hard enforcement
     if (config) {
-        if (config->memory > 0) {
+        // Memory limit using RLIMIT_DATA instead of RLIMIT_AS
+        // RLIMIT_AS is too aggressive and includes mmap, shared libs, etc.
+        // RLIMIT_DATA only limits the data segment (heap)
+        if (config->memory > 0 && config->memory < 8192) { // Only apply if < 8GB to be safe
             struct rlimit rl;
-            rl.rlim_cur = config->memory * 1024 * 1024; // MB to bytes
-            rl.rlim_max = RLIM_INFINITY; // Allow increasing soft limit
-            if (setrlimit(RLIMIT_AS, &rl) == -1) {
-                perror("setrlimit RLIMIT_AS");
+            // Set a generous soft limit (4x the requested amount for overhead)
+            rl.rlim_cur = (rlim_t)config->memory * 1024 * 1024 * 4;
+            rl.rlim_max = RLIM_INFINITY; // No hard limit
+            if (setrlimit(RLIMIT_DATA, &rl) == -1) {
+                // Not critical if this fails
+                fprintf(stderr, "Warning: Could not set memory limit: %s\\n", strerror(errno));
             }
         }
 
-        if (config->cpu > 0) {
+        // CPU time limit - when exceeded, process receives SIGXCPU
+        if (config->cpu > 0 && config->cpu < 3600) { // Only apply if < 1 hour
             struct rlimit rl;
-            rl.rlim_cur = config->cpu; // seconds
-            rl.rlim_max = RLIM_INFINITY; // Allow increasing soft limit
+            rl.rlim_cur = config->cpu; // Soft limit in seconds
+            rl.rlim_max = config->cpu * 2; // Hard limit = 2x soft limit
             if (setrlimit(RLIMIT_CPU, &rl) == -1) {
-                perror("setrlimit RLIMIT_CPU");
+                fprintf(stderr, "Warning: Could not set CPU time limit: %s\\n", strerror(errno));
             }
         }
     }

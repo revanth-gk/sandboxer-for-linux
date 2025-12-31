@@ -313,8 +313,8 @@ void on_create_clicked(GtkButton *button, gpointer user_data) {
         return;
     }
 
-    if (memory < 0 || memory > 1024 || cpu < 1 || cpu > 100) {
-        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Invalid slider values");
+    if (memory < 1 || memory > 1024 || cpu < 1 || cpu > 300) {
+        GtkWidget *dialog = gtk_message_dialog_new(NULL, GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "Invalid slider values (Memory: 1-1024 MB, CPU: 1-300 seconds)");
         gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
         return;
