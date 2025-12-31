@@ -8,6 +8,7 @@
 #include <libgen.h>
 #include <linux/limits.h>
 #include <sys/statvfs.h>
+#include <sys/stat.h>
 #include <dirent.h>
 
 // Global paths - will be set at runtime based on executable location
@@ -1324,7 +1325,6 @@ static gboolean updating_cpu = FALSE;
 
 static void update_memory_info_label(void) {
     if (!label_memory_info) return;
-    int current = (int)gtk_spin_button_get_value(GTK_SPIN_BUTTON(spin_memory));
     char buf[128];
     snprintf(buf, sizeof(buf), "Available: %ld MB / %ld MB total", 
              g_system_available_memory_mb, g_system_total_memory_mb);

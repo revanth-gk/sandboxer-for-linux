@@ -169,16 +169,6 @@ static int get_cpu_count(void) {
     return count > 0 ? count : 1;
 }
 
-// Get total system memory in MB
-static long get_total_memory_mb(void) {
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long page_size = sysconf(_SC_PAGE_SIZE);
-    if (pages > 0 && page_size > 0) {
-        return (pages * page_size) / (1024 * 1024);
-    }
-    return 1024; // Default 1GB if detection fails
-}
-
 // Set CPU affinity to limit cores (call from child process)
 static void apply_cpu_limit(int max_cores) {
     if (max_cores <= 0) return;
