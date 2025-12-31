@@ -153,6 +153,7 @@ static void on_theme_toggle_clicked(GtkButton *button, gpointer user_data);
 // File Explorer and Process Manager combo change handlers
 static void on_file_explorer_sandbox_changed(GtkComboBox *combo, gpointer user_data);
 static void on_process_sandbox_changed(GtkComboBox *combo, gpointer user_data);
+static void populate_sandbox_combo(GtkComboBoxText *combo);
 
 // Detect system resources at startup
 static void detect_system_resources(void) {
