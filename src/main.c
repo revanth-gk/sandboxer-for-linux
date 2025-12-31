@@ -606,17 +606,22 @@ int setup_sandbox(void *arg) {
         return 1;
     }
     
-    // Mount sysfs for CPU info (needed by dpkg)
-    // Network mode has /sys bind mounted, but for non-network we need to mount it
-    // Always try to mount sysfs - if already mounted from network mode, mount will fail gracefully
-    if (mount("sysfs", "/sys", "sysfs", 0, NULL) == -1) {
-        // Check if /sys is already available (from bind mount in network mode)
-        struct stat sys_stat;
-        if (stat("/sys/devices", &sys_stat) != 0) {
-            // /sys still not available after mount failure - not critical but log it
+    // Mount sysfs for CPU info (needed by dpkg/apt)
+    // IMPORTANT: Only mount sysfs for non-network sandboxes
+    // Network sandboxes have /sys bind-mounted from host before chroot
+    // Mounting sysfs on top would mask the bind mount with incomplete namespace-local view
+    if (config && !config->network) {
+        // Non-network mode: mount a namespace-local sysfs
+        if (mount("sysfs", "/sys", "sysfs", 0, NULL) == -1) {
             fprintf(stderr, "Warning: Could not mount /sys filesystem. Some tools (apt, dpkg) may report errors.\\n");
         }
-        // If stat succeeds, /sys is available (bind mounted), which is fine
+    } else {
+        // Network mode: /sys should already be bind-mounted from host
+        // Verify it's accessible
+        struct stat sys_stat;
+        if (stat("/sys/devices", &sys_stat) != 0) {
+            fprintf(stderr, "Warning: /sys/devices not accessible. Package managers may fail.\\n");
+        }
     }
 
     // Mount dev
