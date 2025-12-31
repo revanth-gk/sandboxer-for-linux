@@ -128,7 +128,7 @@ sudo dnf install gcc make gtk3-devel vte291-devel busybox
 ```bash
 git clone <repository-url>
 cd sandboxer-for-linux
-make all
+make clean && make all
 ```
 
 ### Output
