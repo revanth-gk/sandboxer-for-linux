@@ -76,6 +76,11 @@ GtkListStore *process_list_store;
 GtkWidget *process_auto_refresh_check;
 guint process_refresh_timer = 0;
 
+// Dark/Light mode toggle
+static gboolean is_dark_mode = TRUE;
+static GtkCssProvider *theme_provider = NULL;
+GtkWidget *theme_toggle_button;
+
 typedef struct {
     GtkWindow *window;
     char *sandbox_name;
@@ -139,6 +144,15 @@ static void on_process_refresh_clicked(GtkButton *button, gpointer user_data);
 static gboolean on_process_auto_refresh(gpointer user_data);
 static void on_process_auto_toggle(GtkToggleButton *button, gpointer user_data);
 static GtkWidget *create_process_manager_tab(void);
+
+// Dark/Light mode and theme functions
+static void apply_dark_theme(void);
+static void apply_light_theme(void);
+static void on_theme_toggle_clicked(GtkButton *button, gpointer user_data);
+
+// File Explorer and Process Manager combo change handlers
+static void on_file_explorer_sandbox_changed(GtkComboBox *combo, gpointer user_data);
+static void on_process_sandbox_changed(GtkComboBox *combo, gpointer user_data);
 
 // Detect system resources at startup
 static void detect_system_resources(void) {
@@ -524,9 +538,9 @@ void on_enter_clicked(GtkButton *button, gpointer user_data) {
     vte_terminal_set_font(VTE_TERMINAL(terminal), font_desc);
     pango_font_description_free(font_desc);
     
-    // Dracula-inspired color scheme
-    GdkRGBA fg_color = {0.97, 0.97, 0.95, 1.0};  // #f8f8f2
-    GdkRGBA bg_color = {0.16, 0.16, 0.21, 1.0};  // #282a36
+    // Neon green on black color scheme
+    GdkRGBA fg_color = {0.224, 1.0, 0.078, 1.0};  // #39FF14 neon green
+    GdkRGBA bg_color = {0.0, 0.0, 0.0, 1.0};       // #000000 pure black
     vte_terminal_set_colors(VTE_TERMINAL(terminal), &fg_color, &bg_color, NULL, 0);
     
     // Additional terminal settings
@@ -742,39 +756,47 @@ static void init_paths(const char *argv0) {
     }
 }
 
-// Apply CSS styling - Modern Dark Theme with Glassmorphism
-static void apply_css_styling(void) {
-    GtkCssProvider *provider = gtk_css_provider_new();
+// Apply Dark Theme - Ubuntu-inspired dark black + orange
+static void apply_dark_theme(void) {
+    if (theme_provider) {
+        gtk_style_context_remove_provider_for_screen(
+            gdk_screen_get_default(),
+            GTK_STYLE_PROVIDER(theme_provider)
+        );
+        g_object_unref(theme_provider);
+    }
+    
+    theme_provider = gtk_css_provider_new();
     const char *css = 
-        /* === MAIN WINDOW - Deep dark gradient === */
+        /* === MAIN WINDOW - Deep black === */
         "window { "
-        "    background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%); "
+        "    background: linear-gradient(135deg, #0d0d0d 0%, #1a1a1a 50%, #141414 100%); "
         "}"
         
-        /* === FRAMES - Glassmorphism cards === */
+        /* === FRAMES - Dark cards === */
         "frame { "
-        "    background-color: rgba(255, 255, 255, 0.03); "
-        "    border: 1px solid rgba(255, 255, 255, 0.1); "
+        "    background-color: rgba(30, 30, 30, 0.9); "
+        "    border: 1px solid rgba(233, 84, 32, 0.3); "
         "    border-radius: 12px; "
         "}"
         "frame > label { "
         "    font-weight: bold; "
-        "    color: #00d9ff; "
+        "    color: #E95420; "
         "    font-size: 13px; "
-        "    text-shadow: 0 0 10px rgba(0, 217, 255, 0.3); "
+        "    text-shadow: 0 0 10px rgba(233, 84, 32, 0.3); "
         "}"
         
-        /* === LABELS - Clean white/cyan text === */
+        /* === LABELS - White/Orange text === */
         "label { color: #e0e0e0; }"
-        ".accent { color: #00d9ff; }"
+        ".accent { color: #E95420; }"
         ".success { color: #22c55e; }"
-        ".warning { color: #f59e0b; }"
+        ".warning { color: #FF6F00; }"
         ".error { color: #ef4444; }"
         
-        /* === BUTTONS - Glowing gradient === */
+        /* === BUTTONS - Orange gradient === */
         "button { "
-        "    background: linear-gradient(135deg, #1e3a5f 0%, #2d4a6f 100%); "
-        "    border: 1px solid rgba(0, 217, 255, 0.3); "
+        "    background: linear-gradient(135deg, #3d3d3d 0%, #2d2d2d 100%); "
+        "    border: 1px solid rgba(233, 84, 32, 0.4); "
         "    border-radius: 8px; "
         "    padding: 8px 16px; "
         "    color: #ffffff; "
@@ -782,29 +804,29 @@ static void apply_css_styling(void) {
         "    transition: all 200ms ease; "
         "}"
         "button:hover { "
-        "    background: linear-gradient(135deg, #00d9ff 0%, #a855f7 100%); "
-        "    border-color: #00d9ff; "
-        "    box-shadow: 0 0 20px rgba(0, 217, 255, 0.4); "
+        "    background: linear-gradient(135deg, #E95420 0%, #FF6F00 100%); "
+        "    border-color: #E95420; "
+        "    box-shadow: 0 0 20px rgba(233, 84, 32, 0.4); "
         "    color: #ffffff; "
         "}"
         "button:active { "
-        "    background: linear-gradient(135deg, #00b8d9 0%, #9333ea 100%); "
+        "    background: linear-gradient(135deg, #C44117 0%, #E95420 100%); "
         "}"
         "button:disabled { "
-        "    background: #2a2a3a; "
+        "    background: #2a2a2a; "
         "    color: #666; "
         "    border-color: #444; "
         "}"
         
         /* === PRIMARY ACTION BUTTONS === */
         ".primary-button { "
-        "    background: linear-gradient(135deg, #00d9ff 0%, #00b8d9 100%); "
-        "    color: #0f0f1a; "
+        "    background: linear-gradient(135deg, #E95420 0%, #FF6F00 100%); "
+        "    color: #ffffff; "
         "    font-weight: bold; "
         "}"
         ".primary-button:hover { "
-        "    background: linear-gradient(135deg, #22e6ff 0%, #00d9ff 100%); "
-        "    box-shadow: 0 0 25px rgba(0, 217, 255, 0.6); "
+        "    background: linear-gradient(135deg, #FF6F00 0%, #FF8C00 100%); "
+        "    box-shadow: 0 0 25px rgba(233, 84, 32, 0.6); "
         "}"
         
         /* === DANGER BUTTONS === */
@@ -817,22 +839,22 @@ static void apply_css_styling(void) {
         "    box-shadow: 0 0 20px rgba(239, 68, 68, 0.5); "
         "}"
         
-        /* === ENTRY FIELDS - Dark with glow === */
+        /* === ENTRY FIELDS - Dark with orange glow === */
         "entry { "
-        "    background-color: rgba(15, 15, 26, 0.8); "
+        "    background-color: rgba(20, 20, 20, 0.9); "
         "    border: 1px solid rgba(255, 255, 255, 0.1); "
         "    border-radius: 8px; "
         "    padding: 10px 12px; "
         "    color: #ffffff; "
-        "    caret-color: #00d9ff; "
+        "    caret-color: #E95420; "
         "}"
         "entry:focus { "
-        "    border-color: #00d9ff; "
-        "    box-shadow: 0 0 15px rgba(0, 217, 255, 0.3); "
+        "    border-color: #E95420; "
+        "    box-shadow: 0 0 15px rgba(233, 84, 32, 0.3); "
         "}"
-        "entry:disabled { background-color: #1a1a2e; color: #666; }"
+        "entry:disabled { background-color: #1a1a1a; color: #666; }"
         
-        /* === PROGRESS BARS - Gradient fill === */
+        /* === PROGRESS BARS - Orange fill === */
         "progressbar { "
         "    min-height: 12px; "
         "}"
@@ -842,9 +864,9 @@ static void apply_css_styling(void) {
         "    border: 1px solid rgba(255, 255, 255, 0.1); "
         "}"
         "progressbar progress { "
-        "    background: linear-gradient(90deg, #00d9ff 0%, #a855f7 100%); "
+        "    background: linear-gradient(90deg, #E95420 0%, #FF6F00 100%); "
         "    border-radius: 6px; "
-        "    box-shadow: 0 0 10px rgba(0, 217, 255, 0.5); "
+        "    box-shadow: 0 0 10px rgba(233, 84, 32, 0.5); "
         "}"
         
         /* === CPU PROGRESS BAR === */
@@ -854,51 +876,54 @@ static void apply_css_styling(void) {
         
         /* === MEMORY PROGRESS BAR === */
         ".mem-bar progress { "
-        "    background: linear-gradient(90deg, #a855f7 0%, #ec4899 100%); "
+        "    background: linear-gradient(90deg, #E95420 0%, #FF6F00 100%); "
         "}"
         
-        /* === SCALES/SLIDERS === */
-        "scale { min-height: 20px; }"
+        /* === SCALES/SLIDERS - VMWare style with tick marks === */
+        "scale { min-height: 26px; }"
         "scale trough { "
         "    background-color: rgba(255, 255, 255, 0.1); "
         "    border-radius: 10px; "
         "    min-height: 8px; "
         "}"
         "scale highlight { "
-        "    background: linear-gradient(90deg, #00d9ff, #a855f7); "
+        "    background: linear-gradient(90deg, #E95420, #FF6F00); "
         "    border-radius: 10px; "
         "}"
         "scale slider { "
-        "    background: linear-gradient(135deg, #00d9ff, #00b8d9); "
+        "    background: linear-gradient(135deg, #E95420, #FF6F00); "
         "    border-radius: 50%; "
-        "    min-width: 20px; "
-        "    min-height: 20px; "
-        "    box-shadow: 0 0 10px rgba(0, 217, 255, 0.5); "
+        "    min-width: 22px; "
+        "    min-height: 22px; "
+        "    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 10px rgba(233, 84, 32, 0.5); "
+        "    border: 2px solid #ffffff; "
         "}"
         "scale slider:hover { "
-        "    background: linear-gradient(135deg, #22e6ff, #00d9ff); "
-        "    box-shadow: 0 0 15px rgba(0, 217, 255, 0.7); "
+        "    background: linear-gradient(135deg, #FF6F00, #FF8C00); "
+        "    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.6), 0 0 15px rgba(233, 84, 32, 0.7); "
         "}"
+        "scale marks { color: #888; }"
+        "scale mark { background-color: #666; min-width: 2px; min-height: 8px; }"
         
         /* === SPIN BUTTONS === */
         "spinbutton { "
-        "    background-color: rgba(15, 15, 26, 0.8); "
+        "    background-color: rgba(20, 20, 20, 0.9); "
         "    border: 1px solid rgba(255, 255, 255, 0.1); "
         "    border-radius: 8px; "
         "    color: #ffffff; "
         "}"
-        "spinbutton:focus { border-color: #00d9ff; }"
+        "spinbutton:focus { border-color: #E95420; }"
         "spinbutton button { "
-        "    background: rgba(0, 217, 255, 0.2); "
+        "    background: rgba(233, 84, 32, 0.2); "
         "    border: none; "
-        "    color: #00d9ff; "
+        "    color: #E95420; "
         "}"
-        "spinbutton button:hover { background: rgba(0, 217, 255, 0.4); }"
+        "spinbutton button:hover { background: rgba(233, 84, 32, 0.4); }"
         
-        /* === NOTEBOOK TABS - Glowing active tab === */
+        /* === NOTEBOOK TABS - Orange active tab === */
         "notebook { background-color: transparent; }"
         "notebook header { "
-        "    background-color: rgba(15, 15, 26, 0.5); "
+        "    background-color: rgba(15, 15, 15, 0.8); "
         "    border-bottom: 1px solid rgba(255, 255, 255, 0.1); "
         "}"
         "notebook tab { "
@@ -909,20 +934,20 @@ static void apply_css_styling(void) {
         "    font-weight: 500; "
         "}"
         "notebook tab:hover { "
-        "    color: #00d9ff; "
-        "    background-color: rgba(0, 217, 255, 0.1); "
+        "    color: #E95420; "
+        "    background-color: rgba(233, 84, 32, 0.1); "
         "}"
         "notebook tab:checked { "
-        "    color: #00d9ff; "
-        "    background: linear-gradient(180deg, rgba(0, 217, 255, 0.2), transparent); "
-        "    border-bottom: 2px solid #00d9ff; "
-        "    box-shadow: 0 2px 10px rgba(0, 217, 255, 0.3); "
+        "    color: #E95420; "
+        "    background: linear-gradient(180deg, rgba(233, 84, 32, 0.2), transparent); "
+        "    border-bottom: 2px solid #E95420; "
+        "    box-shadow: 0 2px 10px rgba(233, 84, 32, 0.3); "
         "}"
         "notebook stack { background-color: transparent; }"
         
         /* === LIST BOX - Dark rows with hover glow === */
         "list { "
-        "    background-color: rgba(15, 15, 26, 0.5); "
+        "    background-color: rgba(15, 15, 15, 0.7); "
         "    border-radius: 8px; "
         "}"
         "list row { "
@@ -931,90 +956,107 @@ static void apply_css_styling(void) {
         "    transition: all 150ms ease; "
         "}"
         "list row:hover { "
-        "    background-color: rgba(0, 217, 255, 0.1); "
+        "    background-color: rgba(233, 84, 32, 0.1); "
         "}"
         "list row:selected { "
-        "    background: linear-gradient(90deg, rgba(0, 217, 255, 0.2), rgba(168, 85, 247, 0.2)); "
-        "    border-left: 3px solid #00d9ff; "
+        "    background: linear-gradient(90deg, rgba(233, 84, 32, 0.2), rgba(255, 111, 0, 0.2)); "
+        "    border-left: 3px solid #E95420; "
         "}"
         
         /* === SCROLLED WINDOW === */
         "scrolledwindow { "
-        "    background-color: rgba(15, 15, 26, 0.3); "
+        "    background-color: rgba(15, 15, 15, 0.5); "
         "    border: 1px solid rgba(255, 255, 255, 0.05); "
         "    border-radius: 8px; "
         "}"
         "scrollbar { background-color: transparent; }"
         "scrollbar slider { "
-        "    background-color: rgba(0, 217, 255, 0.3); "
+        "    background-color: rgba(233, 84, 32, 0.3); "
         "    border-radius: 10px; "
         "    min-width: 8px; "
         "}"
-        "scrollbar slider:hover { background-color: rgba(0, 217, 255, 0.5); }"
+        "scrollbar slider:hover { background-color: rgba(233, 84, 32, 0.5); }"
         
         /* === CHECK BUTTONS === */
         "checkbutton { color: #e0e0e0; }"
         "checkbutton check { "
-        "    background-color: rgba(15, 15, 26, 0.8); "
+        "    background-color: rgba(20, 20, 20, 0.9); "
         "    border: 2px solid rgba(255, 255, 255, 0.2); "
         "    border-radius: 4px; "
         "    min-width: 20px; "
         "    min-height: 20px; "
         "}"
         "checkbutton check:checked { "
-        "    background: linear-gradient(135deg, #00d9ff, #a855f7); "
-        "    border-color: #00d9ff; "
+        "    background: linear-gradient(135deg, #E95420, #FF6F00); "
+        "    border-color: #E95420; "
         "}"
-        "checkbutton:hover check { border-color: #00d9ff; }"
+        "checkbutton:hover check { border-color: #E95420; }"
+        
+        /* === COMBO BOX === */
+        "combobox { "
+        "    background-color: rgba(20, 20, 20, 0.9); "
+        "    border: 1px solid rgba(255, 255, 255, 0.1); "
+        "    border-radius: 8px; "
+        "    color: #ffffff; "
+        "}"
+        "combobox button { "
+        "    background: rgba(40, 40, 40, 0.9); "
+        "    border: 1px solid rgba(233, 84, 32, 0.3); "
+        "}"
+        "combobox button:hover { "
+        "    background: rgba(233, 84, 32, 0.2); "
+        "    border-color: #E95420; "
+        "}"
         
         /* === SEPARATOR === */
         "separator { "
-        "    background: linear-gradient(90deg, transparent, rgba(0, 217, 255, 0.3), transparent); "
+        "    background: linear-gradient(90deg, transparent, rgba(233, 84, 32, 0.3), transparent); "
         "    min-height: 1px; "
         "}"
         
         /* === STATUS BAR - Subtle gradient === */
         ".status-bar { "
-        "    background: linear-gradient(90deg, rgba(0, 217, 255, 0.1), rgba(168, 85, 247, 0.1)); "
+        "    background: linear-gradient(90deg, rgba(233, 84, 32, 0.1), rgba(255, 111, 0, 0.1)); "
         "    color: #888; "
         "    padding: 8px 16px; "
         "    font-size: 11px; "
         "    border-top: 1px solid rgba(255, 255, 255, 0.05); "
         "}"
         
-        /* === TEXT VIEW (Logs) - Terminal style === */
+        /* === TEXT VIEW (Logs) - Neon green on black === */
         "textview { "
-        "    background-color: #0a0a12; "
-        "    color: #22c55e; "
+        "    background-color: #0a0a0a; "
+        "    color: #39FF14; "
         "    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; "
+        "    font-size: 11px; "
         "}"
-        "textview text { background-color: #0a0a12; }"
+        "textview text { background-color: #0a0a0a; color: #39FF14; }"
         
         /* === TREE VIEW (File Explorer) === */
         "treeview { "
-        "    background-color: rgba(15, 15, 26, 0.5); "
+        "    background-color: rgba(15, 15, 15, 0.7); "
         "    color: #e0e0e0; "
         "}"
         "treeview:selected { "
-        "    background-color: rgba(0, 217, 255, 0.2); "
+        "    background-color: rgba(233, 84, 32, 0.3); "
         "}"
         "treeview header button { "
-        "    background: rgba(0, 217, 255, 0.1); "
+        "    background: rgba(233, 84, 32, 0.15); "
         "    border: none; "
-        "    color: #00d9ff; "
+        "    color: #E95420; "
         "    font-weight: bold; "
         "}"
         
         /* === SANDBOX CARD STYLES === */
         ".sandbox-card { "
-        "    background: rgba(255, 255, 255, 0.02); "
+        "    background: rgba(30, 30, 30, 0.8); "
         "    border: 1px solid rgba(255, 255, 255, 0.08); "
         "    border-radius: 12px; "
         "    padding: 16px; "
         "}"
         ".sandbox-card:hover { "
-        "    background: rgba(0, 217, 255, 0.05); "
-        "    border-color: rgba(0, 217, 255, 0.3); "
+        "    background: rgba(233, 84, 32, 0.1); "
+        "    border-color: rgba(233, 84, 32, 0.3); "
         "}"
         
         /* === STATUS INDICATORS === */
@@ -1026,24 +1068,321 @@ static void apply_css_styling(void) {
         ".app-title { "
         "    font-size: 24px; "
         "    font-weight: bold; "
-        "    color: #00d9ff; "
-        "    text-shadow: 0 0 20px rgba(0, 217, 255, 0.5); "
+        "    color: #E95420; "
+        "    text-shadow: 0 0 20px rgba(233, 84, 32, 0.5); "
         "}"
         
         /* === PANED DIVIDER === */
         "paned separator { "
-        "    background-color: rgba(0, 217, 255, 0.2); "
+        "    background-color: rgba(233, 84, 32, 0.3); "
         "    min-width: 4px; "
         "}"
-        "paned separator:hover { background-color: rgba(0, 217, 255, 0.5); }";
+        "paned separator:hover { background-color: rgba(233, 84, 32, 0.6); }"
+        
+        /* === THEME TOGGLE BUTTON === */
+        ".theme-toggle { "
+        "    background: linear-gradient(135deg, #2d2d2d 0%, #1a1a1a 100%); "
+        "    border: 1px solid rgba(233, 84, 32, 0.4); "
+        "    padding: 6px 12px; "
+        "    border-radius: 20px; "
+        "}"
+        ".theme-toggle:hover { "
+        "    background: linear-gradient(135deg, #E95420 0%, #FF6F00 100%); "
+        "}";
     
-    gtk_css_provider_load_from_data(provider, css, -1, NULL);
+    gtk_css_provider_load_from_data(theme_provider, css, -1, NULL);
     gtk_style_context_add_provider_for_screen(
         gdk_screen_get_default(),
-        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER(theme_provider),
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
     );
-    g_object_unref(provider);
+}
+
+// Apply Light Theme - Clean light theme with orange accents
+static void apply_light_theme(void) {
+    if (theme_provider) {
+        gtk_style_context_remove_provider_for_screen(
+            gdk_screen_get_default(),
+            GTK_STYLE_PROVIDER(theme_provider)
+        );
+        g_object_unref(theme_provider);
+    }
+    
+    theme_provider = gtk_css_provider_new();
+    const char *css = 
+        /* === MAIN WINDOW - Light gray === */
+        "window { "
+        "    background: linear-gradient(135deg, #f5f5f5 0%, #e8e8e8 50%, #f0f0f0 100%); "
+        "}"
+        
+        /* === FRAMES === */
+        "frame { "
+        "    background-color: rgba(255, 255, 255, 0.95); "
+        "    border: 1px solid rgba(0, 0, 0, 0.1); "
+        "    border-radius: 12px; "
+        "}"
+        "frame > label { "
+        "    font-weight: bold; "
+        "    color: #E95420; "
+        "    font-size: 13px; "
+        "}"
+        
+        /* === LABELS === */
+        "label { color: #333333; }"
+        ".accent { color: #E95420; }"
+        ".success { color: #16a34a; }"
+        ".warning { color: #d97706; }"
+        ".error { color: #dc2626; }"
+        
+        /* === BUTTONS - Orange accent === */
+        "button { "
+        "    background: linear-gradient(135deg, #f0f0f0 0%, #e0e0e0 100%); "
+        "    border: 1px solid rgba(0, 0, 0, 0.15); "
+        "    border-radius: 8px; "
+        "    padding: 8px 16px; "
+        "    color: #333333; "
+        "    font-weight: 500; "
+        "}"
+        "button:hover { "
+        "    background: linear-gradient(135deg, #E95420 0%, #FF6F00 100%); "
+        "    border-color: #E95420; "
+        "    box-shadow: 0 2px 10px rgba(233, 84, 32, 0.3); "
+        "    color: #ffffff; "
+        "}"
+        "button:active { "
+        "    background: linear-gradient(135deg, #C44117 0%, #E95420 100%); "
+        "}"
+        "button:disabled { "
+        "    background: #e0e0e0; "
+        "    color: #999; "
+        "    border-color: #ccc; "
+        "}"
+        
+        /* === PRIMARY BUTTONS === */
+        ".primary-button { "
+        "    background: linear-gradient(135deg, #E95420 0%, #FF6F00 100%); "
+        "    color: #ffffff; "
+        "    font-weight: bold; "
+        "}"
+        
+        /* === DANGER BUTTONS === */
+        ".danger-button { "
+        "    background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%); "
+        "    color: #ffffff; "
+        "}"
+        
+        /* === ENTRY FIELDS === */
+        "entry { "
+        "    background-color: #ffffff; "
+        "    border: 1px solid rgba(0, 0, 0, 0.15); "
+        "    border-radius: 8px; "
+        "    padding: 10px 12px; "
+        "    color: #333333; "
+        "    caret-color: #E95420; "
+        "}"
+        "entry:focus { "
+        "    border-color: #E95420; "
+        "    box-shadow: 0 0 10px rgba(233, 84, 32, 0.2); "
+        "}"
+        
+        /* === PROGRESS BARS === */
+        "progressbar { min-height: 12px; }"
+        "progressbar trough { "
+        "    background-color: #e0e0e0; "
+        "    border-radius: 6px; "
+        "    border: 1px solid #ccc; "
+        "}"
+        "progressbar progress { "
+        "    background: linear-gradient(90deg, #E95420 0%, #FF6F00 100%); "
+        "    border-radius: 6px; "
+        "}"
+        ".cpu-bar progress { "
+        "    background: linear-gradient(90deg, #22c55e 0%, #eab308 50%, #ef4444 100%); "
+        "}"
+        ".mem-bar progress { "
+        "    background: linear-gradient(90deg, #E95420 0%, #FF6F00 100%); "
+        "}"
+        
+        /* === SCALES/SLIDERS === */
+        "scale { min-height: 26px; }"
+        "scale trough { "
+        "    background-color: #ddd; "
+        "    border-radius: 10px; "
+        "    min-height: 8px; "
+        "}"
+        "scale highlight { "
+        "    background: linear-gradient(90deg, #E95420, #FF6F00); "
+        "    border-radius: 10px; "
+        "}"
+        "scale slider { "
+        "    background: linear-gradient(135deg, #E95420, #FF6F00); "
+        "    border-radius: 50%; "
+        "    min-width: 22px; "
+        "    min-height: 22px; "
+        "    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25); "
+        "    border: 2px solid #ffffff; "
+        "}"
+        
+        /* === SPIN BUTTONS === */
+        "spinbutton { "
+        "    background-color: #ffffff; "
+        "    border: 1px solid rgba(0, 0, 0, 0.15); "
+        "    border-radius: 8px; "
+        "    color: #333333; "
+        "}"
+        "spinbutton button { "
+        "    background: rgba(233, 84, 32, 0.1); "
+        "    color: #E95420; "
+        "}"
+        
+        /* === NOTEBOOK TABS === */
+        "notebook { background-color: transparent; }"
+        "notebook header { "
+        "    background-color: rgba(255, 255, 255, 0.9); "
+        "    border-bottom: 1px solid rgba(0, 0, 0, 0.1); "
+        "}"
+        "notebook tab { "
+        "    background-color: transparent; "
+        "    padding: 10px 20px; "
+        "    color: #666; "
+        "    font-weight: 500; "
+        "}"
+        "notebook tab:hover { color: #E95420; }"
+        "notebook tab:checked { "
+        "    color: #E95420; "
+        "    border-bottom: 2px solid #E95420; "
+        "}"
+        "notebook stack { background-color: transparent; }"
+        
+        /* === LIST BOX === */
+        "list { "
+        "    background-color: rgba(255, 255, 255, 0.9); "
+        "    border-radius: 8px; "
+        "}"
+        "list row { "
+        "    padding: 12px 16px; "
+        "    border-bottom: 1px solid rgba(0, 0, 0, 0.05); "
+        "}"
+        "list row:hover { background-color: rgba(233, 84, 32, 0.1); }"
+        "list row:selected { "
+        "    background: rgba(233, 84, 32, 0.15); "
+        "    border-left: 3px solid #E95420; "
+        "}"
+        
+        /* === SCROLLED WINDOW === */
+        "scrolledwindow { "
+        "    background-color: rgba(255, 255, 255, 0.8); "
+        "    border: 1px solid rgba(0, 0, 0, 0.08); "
+        "    border-radius: 8px; "
+        "}"
+        "scrollbar slider { "
+        "    background-color: rgba(233, 84, 32, 0.3); "
+        "    border-radius: 10px; "
+        "}"
+        
+        /* === CHECK BUTTONS === */
+        "checkbutton { color: #333333; }"
+        "checkbutton check { "
+        "    background-color: #ffffff; "
+        "    border: 2px solid #ccc; "
+        "    border-radius: 4px; "
+        "}"
+        "checkbutton check:checked { "
+        "    background: linear-gradient(135deg, #E95420, #FF6F00); "
+        "    border-color: #E95420; "
+        "}"
+        
+        /* === COMBO BOX === */
+        "combobox button { "
+        "    background: #ffffff; "
+        "    border: 1px solid #ccc; "
+        "}"
+        "combobox button:hover { border-color: #E95420; }"
+        
+        /* === SEPARATOR === */
+        "separator { "
+        "    background: linear-gradient(90deg, transparent, rgba(0, 0, 0, 0.1), transparent); "
+        "}"
+        
+        /* === STATUS BAR === */
+        ".status-bar { "
+        "    background: rgba(233, 84, 32, 0.1); "
+        "    color: #666; "
+        "    padding: 8px 16px; "
+        "    font-size: 11px; "
+        "}"
+        
+        /* === TEXT VIEW (Logs) - Dark on light for readability === */
+        "textview { "
+        "    background-color: #1a1a1a; "
+        "    color: #39FF14; "
+        "    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; "
+        "    font-size: 11px; "
+        "}"
+        "textview text { background-color: #1a1a1a; color: #39FF14; }"
+        
+        /* === TREE VIEW === */
+        "treeview { "
+        "    background-color: rgba(255, 255, 255, 0.9); "
+        "    color: #333333; "
+        "}"
+        "treeview:selected { background-color: rgba(233, 84, 32, 0.2); }"
+        "treeview header button { "
+        "    background: rgba(233, 84, 32, 0.1); "
+        "    color: #E95420; "
+        "    font-weight: bold; "
+        "}"
+        
+        /* === HEADER TITLE === */
+        ".app-title { "
+        "    font-size: 24px; "
+        "    font-weight: bold; "
+        "    color: #E95420; "
+        "}"
+        
+        /* === PANED DIVIDER === */
+        "paned separator { "
+        "    background-color: rgba(233, 84, 32, 0.3); "
+        "    min-width: 4px; "
+        "}"
+        
+        /* === THEME TOGGLE === */
+        ".theme-toggle { "
+        "    background: #ffffff; "
+        "    border: 1px solid rgba(0, 0, 0, 0.15); "
+        "    padding: 6px 12px; "
+        "    border-radius: 20px; "
+        "}";
+    
+    gtk_css_provider_load_from_data(theme_provider, css, -1, NULL);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(),
+        GTK_STYLE_PROVIDER(theme_provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+    );
+}
+
+// Theme toggle callback
+static void on_theme_toggle_clicked(GtkButton *button, gpointer user_data) {
+    (void)user_data;
+    is_dark_mode = !is_dark_mode;
+    
+    if (is_dark_mode) {
+        apply_dark_theme();
+        gtk_button_set_label(button, "☀️ Light");
+    } else {
+        apply_light_theme();
+        gtk_button_set_label(button, "🌙 Dark");
+    }
+}
+
+// Apply current theme based on is_dark_mode setting
+static void apply_css_styling(void) {
+    if (is_dark_mode) {
+        apply_dark_theme();
+    } else {
+        apply_light_theme();
+    }
 }
 
 // Get system uptime
@@ -1343,8 +1682,13 @@ static void on_memory_slider_changed(GtkRange *range, gpointer user_data) {
     (void)user_data;
     if (updating_memory) return;
     updating_memory = TRUE;
-    int value = (int)gtk_range_get_value(range);
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_memory), value);
+    int raw_value = (int)gtk_range_get_value(range);
+    // VMWare-style snap to 128MB intervals
+    int step = 128;
+    int snapped = ((raw_value + step/2) / step) * step;
+    if (snapped < 128) snapped = 128;  // Minimum 128MB
+    gtk_range_set_value(range, snapped);
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin_memory), snapped);
     update_memory_info_label();
     updating_memory = FALSE;
 }
@@ -1353,8 +1697,13 @@ static void on_memory_spin_changed(GtkSpinButton *spin, gpointer user_data) {
     (void)user_data;
     if (updating_memory) return;
     updating_memory = TRUE;
-    int value = (int)gtk_spin_button_get_value(spin);
-    gtk_range_set_value(GTK_RANGE(scale_memory), value);
+    int raw_value = (int)gtk_spin_button_get_value(spin);
+    // Snap to 128MB intervals
+    int step = 128;
+    int snapped = ((raw_value + step/2) / step) * step;
+    if (snapped < 128) snapped = 128;
+    gtk_spin_button_set_value(spin, snapped);
+    gtk_range_set_value(GTK_RANGE(scale_memory), snapped);
     update_memory_info_label();
     updating_memory = FALSE;
 }
@@ -1451,6 +1800,28 @@ static void populate_sandbox_combo(GtkComboBoxText *combo) {
     }
     if (sandboxes) {
         gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
+    }
+}
+
+// File Explorer sandbox combo changed callback - fixes the dropdown bug
+static void on_file_explorer_sandbox_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(combo));
+    if (sandbox && *sandbox) {
+        // Reset path to root and refresh file list
+        gtk_entry_set_text(GTK_ENTRY(file_path_entry), "/");
+        refresh_file_list(sandbox, "/");
+        g_free((gchar*)sandbox);
+    }
+}
+
+// Process Manager sandbox combo changed callback
+static void on_process_sandbox_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    const char *sandbox = get_selected_sandbox_name(GTK_COMBO_BOX_TEXT(combo));
+    if (sandbox && *sandbox) {
+        refresh_process_list(sandbox);
+        g_free((gchar*)sandbox);
     }
 }
 
@@ -1791,6 +2162,7 @@ static GtkWidget *create_file_explorer_tab(void) {
     
     file_explorer_sandbox_combo = gtk_combo_box_text_new();
     gtk_widget_set_size_request(file_explorer_sandbox_combo, 150, -1);
+    g_signal_connect(file_explorer_sandbox_combo, "changed", G_CALLBACK(on_file_explorer_sandbox_changed), NULL);
     gtk_box_pack_start(GTK_BOX(header), file_explorer_sandbox_combo, FALSE, FALSE, 0);
     
     // Path bar
@@ -2081,6 +2453,7 @@ static GtkWidget *create_process_manager_tab(void) {
     
     process_sandbox_combo = gtk_combo_box_text_new();
     gtk_widget_set_size_request(process_sandbox_combo, 150, -1);
+    g_signal_connect(process_sandbox_combo, "changed", G_CALLBACK(on_process_sandbox_changed), NULL);
     gtk_box_pack_start(GTK_BOX(header), process_sandbox_combo, FALSE, FALSE, 0);
     
     // Process list
@@ -2181,7 +2554,7 @@ int main(int argc, char *argv[]) {
     gtk_box_pack_start(GTK_BOX(main_vbox), header_box, FALSE, FALSE, 0);
     
     GtkWidget *title_label = gtk_label_new(NULL);
-    gtk_label_set_markup(GTK_LABEL(title_label), "<span size='x-large' weight='bold' color='#00d9ff'>🔒 Linux Sandbox Manager</span>");
+    gtk_label_set_markup(GTK_LABEL(title_label), "<span size='x-large' weight='bold' color='#E95420'>🔒 Linux Sandbox Manager</span>");
     GtkStyleContext *title_ctx = gtk_widget_get_style_context(title_label);
     gtk_style_context_add_class(title_ctx, "app-title");
     gtk_box_pack_start(GTK_BOX(header_box), title_label, FALSE, FALSE, 0);
@@ -2189,6 +2562,13 @@ int main(int argc, char *argv[]) {
     // Spacer
     GtkWidget *spacer = gtk_label_new("");
     gtk_box_pack_start(GTK_BOX(header_box), spacer, TRUE, TRUE, 0);
+    
+    // Theme toggle button
+    theme_toggle_button = gtk_button_new_with_label("☀️ Light");
+    GtkStyleContext *toggle_ctx = gtk_widget_get_style_context(theme_toggle_button);
+    gtk_style_context_add_class(toggle_ctx, "theme-toggle");
+    g_signal_connect(theme_toggle_button, "clicked", G_CALLBACK(on_theme_toggle_clicked), NULL);
+    gtk_box_pack_end(GTK_BOX(header_box), theme_toggle_button, FALSE, FALSE, 0);
     
     // About button
     GtkWidget *btn_about = gtk_button_new_with_label("ℹ About");
